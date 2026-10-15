@@ -331,6 +331,7 @@ The emulator core is portable C++17 and is tested on Linux:
 
 ## License
 
-MIT, see `LICENSE`. The icons in `artwork/icons` come from Haiku's icon
-set (MIT, Haiku, Inc.). The BeBox ROMs and BeOS are not part of this
+MIT, see `LICENSE`. The application icon (`artwork/BeBox.hvif`) is by
+zuMi, under the MIT License. The icons in `artwork/icons` come from Haiku's
+icon set (MIT, Haiku, Inc.). The BeBox ROMs and BeOS are not part of this
 project.
