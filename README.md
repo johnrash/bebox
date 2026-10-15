@@ -1,8 +1,19 @@
 # BeBox
+BeBox is a Haiku application that emulates Be Inc.'s BeBox, the
+dual-processor computer that BeOS was born on. It runs both PowerPC models
+from their original boot ROMs, with BeOS for PowerPC from Developer Release
+6 through R5.0.3. It also runs the Hobbit prototypes that came before them,
+built around two AT&T Hobbit processors, with Be's 1993-94 system from
+their surviving disks.
 
-BeBox is a Haiku application that emulates Be Inc.'s BeBox, the dual
-AT&T Hobbit / PowerPC machines that BeOS was born on. It runs the original boot ROMs and BeOS for
-Hobbit or PowerPC from the earliest Hobbit versions, to Developer Release 6 through R5.0.3.
+<p>
+  <a href="screenshots/screenshotrom.png"><img src="screenshots/screenshotrom.png" alt="The BeBox boot ROM's Be logo" width="380"></a>
+  <a href="screenshots/screenshothobbit2.png"><img src="screenshots/screenshothobbit2.png" alt="The Hobbit prototype's Browser, HeapWatch and Clock" width="380"></a>
+  <a href="screenshots/screenshotd6.png"><img src="screenshots/screenshotd6.png" alt="BeOS 1.1d6" width="380"></a>
+  <a href="screenshots/screenshotr2.png"><img src="screenshots/screenshotr2.png" alt="BeOS R3 with GL Teapot, BeBounce and the CPU monitor" width="380"></a>
+  <a href="screenshots/screenshot503.png"><img src="screenshots/screenshot503.png" alt="BeOS R5.0.3 on the BeBox" width="380"></a>
+  <a href="screenshots/screenshotprefs.png"><img src="screenshots/screenshotprefs.png" alt="Bebox preferences" width="380"></a>
+</p>
 
 | Model | Processors | Bus |
 |---|---|---|
@@ -43,9 +54,10 @@ Not emulated yet: the parallel port, GeekPort, MIDI and infrared ports.
   and `bootmain.rom` (Be Boot ROM 1.1d7) from a BeBox, in a folder of your
   choice.
 - **BeOS for PowerPC**: CD images (ISO, BIN/CUE or Toast).
-- For the releases with the Be File System (Advanced Access, Preview
-  Releases, R3, R4.5): their newer boot ROM, which the CDs carry as
-  `/beos/etc/bebox_bootmain.image`. BeBox extracts it for you (see below).
+- For the releases with the Be File System (Advanced Access to R5): a
+  newer boot ROM, which the Preview Release 2, R3 and R4.5 CDs carry as
+  `/beos/etc/bebox_bootmain.image` (Advanced Access, Preview Release 1 and
+  R5 use one of those). BeBox extracts it for you (see below).
 
 ## Getting started
 
@@ -158,16 +170,18 @@ became the profile "Default".
 | Release | Boot ROM | Boots from CD | Installs to disk |
 |---|---|---|---|
 | DR6 (BeOS 1.1d6) | original 1.1d7 | yes | yes |
-| DR7 (BeOS 1.1d7) | original 1.1d7 | yes | - |
+| DR7 (BeOS 1.1d7) | original 1.1d7 | yes | yes |
 | DR8 | original 1.1d7 | yes | yes |
-| Advanced Access | PR2's | yes | - |
+| Advanced Access | PR2's | yes | yes |
 | Preview Release 1 | PR2's | yes | - |
-| Preview Release 2 | from its CD | yes | - |
+| Preview Release 2 | from its CD | yes | yes |
 | R3 | from its CD | yes | yes |
 | R4.5 | from its CD | yes | yes |
+| R5.0.3 | R3's | yes | yes |
 
 "-" means not tried yet. The DR8.2 image is a Mac updater, and the R4 image
-is x86 only.
+is x86 only. The boot ROM from the R3 CD works with every release tested
+here, so one profile with it can run them all.
 
 DR6 predates the 1.1d7 boot ROM: BeBox hands its kernel the PCI device
 table in the older format it expects. Install it as the CD says: boot the
@@ -309,6 +323,11 @@ The emulator core is portable C++17 and is tested on Linux:
   drives it with `hey`.
 
 `design/` describes the hardware and the emulator's design.
+
+## Authors
+
+- Claude Opus 5.5
+- John Rash
 
 ## License
 
