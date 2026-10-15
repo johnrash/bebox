@@ -1,9 +1,8 @@
 # BeBox
 
 BeBox is a Haiku application that emulates Be Inc.'s BeBox, the dual
-PowerPC machine BeOS was born on. It runs the original boot ROM and BeOS for
-PowerPC from Developer Release 6 to R4.5, on both models, and the system of
-the earlier Hobbit prototypes (see [The Hobbit prototype](#the-hobbit-prototype)):
+AT&T Hobbit / PowerPC machines that BeOS was born on. It runs the original boot ROMs and BeOS for
+Hobbit or PowerPC from the earliest Hobbit versions, to Developer Release 6 through R5.0.3.
 
 | Model | Processors | Bus |
 |---|---|---|
