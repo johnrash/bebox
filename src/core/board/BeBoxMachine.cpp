@@ -868,6 +868,23 @@ BeBoxMachine::InstructionCount() const
 }
 
 
+double
+BeBoxMachine::NominalInstructionTicks() const
+{
+	double ticksPerCycle = fConfig.model == MachineConfig::kBeBox133 ? 2 : 4;
+	return std::max(1.0, ticksPerCycle * fConfig.cpiPercent / 100.0);
+}
+
+
+void
+BeBoxMachine::SetInstructionTicks(u32 ticks)
+{
+	// between time slices: the worker thread is waiting
+	for (auto& cpu : fCpus)
+		cpu->SetTicksPerInstruction(ticks);
+}
+
+
 void
 BeBoxMachine::SampleLeds(float& left, float& right, float& disk)
 {

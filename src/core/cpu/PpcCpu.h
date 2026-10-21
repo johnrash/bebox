@@ -164,6 +164,11 @@ public:
 									{ if (!_IsForeignThread())
 										fNow = now; }
 			const u64*			NowPointer() const { return &fNow; }
+			// The time an instruction takes (between time slices; the
+			// machine varies it to set the processor's speed).
+			void				SetTicksPerInstruction(u32 ticks)
+									{ fConfig.ticksPerInstruction
+										= ticks > 0 ? ticks : 1; }
 
 			// Input signals. Any thread may set them; in threaded mode
 			// what changes the CPU's state (reset, a bus map change) is

@@ -236,6 +236,13 @@ half as long on the 133 MHz one.
   processor keeps waiting for the other), so BeBox then runs both on one
   core and tries two again every few seconds. The status line shows the
   speed in percent of a real BeBox.
+- **Speed** (**Preferences > Machine**) is the processors' speed: 50%,
+  100% (a real BeBox), 200% or as fast as the computer allows. BeOS's
+  clock, the cursor's blinking and the keyboard's repeat keep real time
+  also with faster processors. When the computer cannot keep up, faster
+  processors give back their extra speed first; at a real BeBox's speed
+  the whole machine runs slower for a moment and catches up (the sound
+  output then keeps more in reserve).
 - **Tools > Serial console** shows a serial port connected to a console.
 - **View** shows the screen at actual or double size or fitted to the
   window, and shows or hides the LEDs. **Full screen** (or the host key
@@ -307,7 +314,7 @@ The machine window answers `hey`:
 
 ```
 hey BeBox get Running of Window BeBox          # also set ... to true/false
-hey BeBox get Speed of Window BeBox            # percent of real time
+hey BeBox get Speed of Window BeBox            # percent of a real BeBox
 hey BeBox get LedLevels of Window BeBox        # left, right (0-15)
 hey BeBox get SerialLog 4 of Window BeBox      # a console port's output
 hey BeBox set Floppy of Window BeBox to /path/disk.img

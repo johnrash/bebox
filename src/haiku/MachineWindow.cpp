@@ -1511,7 +1511,8 @@ static property_info kProperties[] = {
 		"Whether the machine is on; set it to power on or off.", 0,
 		{ B_BOOL_TYPE } },
 	{ "Speed", { B_GET_PROPERTY, 0 }, { B_DIRECT_SPECIFIER, 0 },
-		"Emulated speed in percent of real time.", 0, { B_DOUBLE_TYPE } },
+		"Speed in percent of a real BeBox (time and processors).", 0,
+		{ B_DOUBLE_TYPE } },
 	{ "Mips", { B_GET_PROPERTY, 0 }, { B_DIRECT_SPECIFIER, 0 },
 		"Million instructions per second (both processors).", 0,
 		{ B_DOUBLE_TYPE } },
@@ -1649,9 +1650,10 @@ MachineWindow::_HandleScripting(BMessage* message)
 		text.SetToFormat("received %" B_PRIu64 " dropped %" B_PRIu64
 			" consumed %" B_PRIu64 " output %" B_PRIu64 " underruns %"
 			B_PRIu32 " buffered %" B_PRIu32 " rate %.0f buffer %" B_PRIu32
-			" correction %+.3f%%", stats.received, stats.dropped,
-			stats.consumed, stats.output, stats.underruns, stats.buffered,
-			stats.outputRate, stats.bufferFrames, stats.correction * 100);
+			" correction %+.3f%% prime %" B_PRIu32, stats.received,
+			stats.dropped, stats.consumed, stats.output, stats.underruns,
+			stats.buffered, stats.outputRate, stats.bufferFrames,
+			stats.correction * 100, stats.primeFrames);
 		reply.AddString("result", text);
 	} else if (strcmp(property, "Floppy") == 0) {
 		if (set) {

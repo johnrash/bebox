@@ -124,9 +124,19 @@ keep up. With 3 cores busy from power on (128 MB), the old build ran at
 during playback (64 MB), 11-37% against 99-101% (one underrun at the switch
 to one thread).
 
-`EmulatorThread` runs the machine in slices against the host clock (speed
-limit in percent, or unlimited), posts commands from the UI between slices
-and publishes a status snapshot (speed, MIPS, LED levels). A CPU that dozes
+`EmulatorThread` runs the machine in 1 ms slices against the host clock,
+posts commands from the UI between slices and publishes a status snapshot
+(speed, MIPS, LED levels). Emulated time follows real time; the speed
+setting is the processors' speed: an instruction takes the model's ticks
+divided by a speed factor (`Machine::SetInstructionTicks()`, the fraction
+carried from slice to slice), capped by the setting (as fast as possible:
+a tick an instruction). While the emulation is more than 5 ms behind with
+busy processors the factor drops 3% a slice, and it comes back 1% a slice
+while the thread waits for real time; it never goes below the setting or
+a real BeBox: BeOS's sound (an MP3 decoder) needs every instruction of an
+emulated second, so a host that cannot keep up then slows time (catching
+up within 250 ms), and the sound output keeps more in reserve after it
+ran dry once (`HaikuAudio`: 139 ms, growing to 279 ms). A CPU that dozes
 (MSR[POW] with HID0 DOZE/NAP) is halted until an exception is pending, and
 so is one that branches to itself with external interrupts enabled
 (`b .`): BeOS R4.5's idle loop, which would otherwise keep both processors

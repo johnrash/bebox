@@ -5,6 +5,12 @@
  * The machine is only touched by the emulation thread. Front ends post
  * commands (run on that thread between time slices) and read a status
  * snapshot.
+ *
+ * Emulated time follows real time; the speed limit sets the processors'
+ * speed, so BeOS's clock and timers and the keyboard's repeat keep real
+ * time also when the processors run faster than a real BeBox. When the
+ * host cannot keep up, faster processors give back their extra speed;
+ * at a real BeBox's speed time slows for a while instead (and catches up).
  */
 #ifndef BEBOX_EMULATOR_THREAD_H
 #define BEBOX_EMULATOR_THREAD_H
@@ -31,7 +37,8 @@ public:
 	struct Status {
 		bool running = false;
 		bool paused = false;
-		double speedPercent = 0;	// emulated vs real time
+		// percent of the model's speed (processors and time)
+		double speedPercent = 0;
 		double mips = 0;
 		float leds[2] = { 0, 0 };	// bar graph levels 0-15
 		float disk = 0;				// disk LED duty cycle
@@ -61,7 +68,8 @@ public:
 			void				DiscardCommands();
 			void				SetPaused(bool paused);
 			bool				IsPaused() const { return fPaused; }
-			// 100 = real time, 0 = as fast as possible.
+			// The processors' speed in percent of the model's (100: a real
+			// BeBox), 0 = as fast as possible.
 			void				SetSpeedLimit(int percent)
 									{ fSpeedLimit = percent; }
 

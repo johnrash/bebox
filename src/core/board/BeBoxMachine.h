@@ -75,6 +75,8 @@ public:
 	virtual	u64					TicksPerSecond() const
 									{ return fTicksPerSecond; }
 	virtual	u64					InstructionCount() const;
+	virtual	double				NominalInstructionTicks() const;
+	virtual	void				SetInstructionTicks(u32 ticks);
 
 			// Components
 	virtual	PhysBus&			Bus() { return *fBus; }

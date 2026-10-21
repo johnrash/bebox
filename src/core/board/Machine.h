@@ -68,6 +68,12 @@ public:
 									{ return us * TicksPerSecond()
 										/ 1000000; }
 	virtual	u64					InstructionCount() const = 0;
+			// The processors' speed: the machine ticks an instruction takes
+			// at the model's clock (and the CPI setting), and the ticks it
+			// takes from now on (fewer: faster processors; time is not
+			// affected).
+	virtual	double				NominalInstructionTicks() const = 0;
+	virtual	void				SetInstructionTicks(u32 ticks) = 0;
 
 	virtual	PhysBus&			Bus() = 0;
 	virtual	Scheduler&			GetScheduler() = 0;

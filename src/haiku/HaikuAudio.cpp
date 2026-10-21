@@ -16,12 +16,15 @@ using bebox::u32;
 
 static const uint32 kRingFrames = 1 << 15;		// 0.7 s at 44.1 kHz
 // Start playing once this much is buffered (smooths the start, and is
-// the steady state latency).
-static const uint32 kPrimeFrames = 4096;
+// the steady state latency): 139 ms. When the emulation falls behind real
+// time for longer, the ring runs dry; then it buffers half as much more
+// from then on, up to just over the 250 ms the emulation catches up.
+static const uint32 kPrimeFrames = 6144;
+static const uint32 kMaxPrimeFrames = 12288;
 // Rate control: the sound card's clock and the clock the emulation is
 // paced by drift apart (by more than 1% in some virtual machines), which
 // would drain or fill the ring. The resampling step is corrected by up to
-// kMaxCorrection to keep the (smoothed) fill level near kPrimeFrames.
+// kMaxCorrection to keep the (smoothed) fill level near the prime level.
 static const double kFillSmoothing = 0.02;		// per player buffer
 static const double kRateGain = 0.04;			// per kPrimeFrames of error
 static const double kMaxCorrection = 0.02;
@@ -39,6 +42,7 @@ HaikuAudio::HaikuAudio()
 	fVolume(1.0f),
 	fMuted(false),
 	fPrimed(false),
+	fPrimeFrames(kPrimeFrames),
 	fAverageFill(0),
 	fReceived(0),
 	fDropped(0),
@@ -63,6 +67,7 @@ HaikuAudio::Start()
 {
 	if (fPlayer != nullptr)
 		return B_OK;
+	fPrimeFrames = kPrimeFrames;
 	media_raw_audio_format format = media_raw_audio_format::wildcard;
 	format.frame_rate = 44100;
 	format.channel_count = 2;
@@ -153,6 +158,7 @@ HaikuAudio::GetStats() const
 	stats.outputRate = fOutputRate.load(std::memory_order_relaxed);
 	stats.bufferFrames = fBufferFrames.load(std::memory_order_relaxed);
 	stats.correction = fCorrection.load(std::memory_order_relaxed);
+	stats.primeFrames = fPrimeFrames;
 	return stats;
 }
 
@@ -166,8 +172,9 @@ HaikuAudio::_Fill(float* out, size_t frames, float outputRate)
 	uint32 write = fWrite.load(std::memory_order_acquire);
 	uint32 available = write - read;
 	uint32 start = read;
+	uint32 prime = fPrimeFrames;
 	if (!fPrimed) {
-		if (available < kPrimeFrames) {
+		if (available < prime) {
 			memset(out, 0, frames * 2 * sizeof(float));
 			return;
 		}
@@ -176,7 +183,7 @@ HaikuAudio::_Fill(float* out, size_t frames, float outputRate)
 	}
 	fAverageFill += (available - fAverageFill) * kFillSmoothing;
 	double correction = std::max(-kMaxCorrection, std::min(kMaxCorrection,
-		(fAverageFill - kPrimeFrames) / kPrimeFrames * kRateGain));
+		(fAverageFill - prime) / prime * kRateGain));
 	fCorrection.store((float)correction, std::memory_order_relaxed);
 	double step = (double)fSourceRate.load(std::memory_order_relaxed)
 		/ outputRate * (1.0 + correction);
@@ -187,6 +194,7 @@ HaikuAudio::_Fill(float* out, size_t frames, float outputRate)
 			memset(out + i * 2, 0, (frames - i) * 2 * sizeof(float));
 			fPrimed = false;
 			fUnderruns.fetch_add(1, std::memory_order_relaxed);
+			fPrimeFrames = std::min(kMaxPrimeFrames, prime * 3 / 2);
 			break;
 		}
 		uint32 a = read & (fCapacity - 1);

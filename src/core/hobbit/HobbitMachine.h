@@ -63,6 +63,8 @@ public:
 	virtual	u64					TicksPerSecond() const
 									{ return fTicksPerSecond; }
 	virtual	u64					InstructionCount() const;
+	virtual	double				NominalInstructionTicks() const;
+	virtual	void				SetInstructionTicks(u32 ticks);
 
 	virtual	PhysBus&			Bus() { return *fBus; }
 	virtual	Scheduler&			GetScheduler() { return fScheduler; }

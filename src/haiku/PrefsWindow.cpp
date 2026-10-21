@@ -308,8 +308,8 @@ PrefsWindow::_MachinePage()
 	static const int32 kIoCardValues[] = { 5, 4 };
 	BMenuField* ioCard = _PopUp("I/O card:", kIoCards, kIoCardValues, 2,
 		machine.ioCardRevision, &fIoCardRevision);
-	static const char* const kSpeeds[] = { "50%", "Real time", "200%",
-		"As fast as possible" };
+	static const char* const kSpeeds[] = { "50%", "100% (a real BeBox)",
+		"200%", "As fast as possible" };
 	static const int32 kSpeedValues[] = { 50, 100, 200, 0 };
 	BMenuField* speed = _PopUp("Speed:", kSpeeds, kSpeedValues, 4,
 		fSettings.speedLimit, &fSpeed);
@@ -323,11 +323,14 @@ PrefsWindow::_MachinePage()
 		.AddMenuField(revision, 0, 3)
 		.AddMenuField(ioCard, 0, 4)
 		.AddMenuField(speed, 0, 5)
+		.Add(new BStringView("speed", "The processors' speed: BeOS's clock "
+			"and timers keep real time also when they run faster."), 0, 6,
+			2)
 		.Add(new BStringView("hobbit", "The Hobbit prototype takes the "
-			"memory sizes its kernel knows (4 to 32 MB)."), 0, 6, 2)
+			"memory sizes its kernel knows (4 to 32 MB)."), 0, 7, 2)
 		.Add(new BStringView("hobbit2", "Motherboard and I/O card are "
-			"BeBox options."), 0, 7, 2)
-		.AddGlue(0, 8, 2);
+			"BeBox options."), 0, 8, 2)
+		.AddGlue(0, 9, 2);
 	return page;
 }
 
