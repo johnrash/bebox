@@ -11,7 +11,8 @@ src/core/      portable C++17, no Haiku headers: the machine
                the kind), BeBoxMachine (assembly, run loop), BeBoxBoard
                (Be registers, LEDs), Scheduler (timers), Flash29F0x0,
                MachineConfig, BootItems (the boot ROM's boot items,
-               adapted for DR6)
+               adapted for DR6), ThreadGovernor (threaded mode: one host
+               thread or two)
   hobbit/      the Hobbit prototype: HobbitMachine (assembly, run loop,
                the boot ROM's job), HobbitCpu and HobbitDisasm (AT&T
                92010), HobbitBoard (I/O window, interrupts, resets, floppy
@@ -76,6 +77,52 @@ Both processors busy (DR6, or BeOS at work), threaded mode is 1.7-1.8
 times as fast; `THREADS=1 tests/boot-regression.sh` boots every case so,
 and `cpu-unit-tests` counts 200000 `lwarx`/`stwcx.` increments from two
 threads.
+
+That holds while both threads have a core of their own. When other work
+keeps the host's cores busy, the scheduler takes one of the threads off
+its core for milliseconds at a time and every handover waits for it:
+R4.5 at 133 MHz with 5 busy loops on 6 cores ran at 201% on two threads
+against 283% on one, and R5 playing an MP3 in the app with 3 of 4 cores
+busy at 5-37% of real time. `ThreadGovernor` therefore chooses one or
+two threads for the slices in which both CPUs run:
+
+- With two threads, each thread times its waits for the other beyond 256
+  spins (a clock read only then; a wait both threads did at once counts
+  once). Over 0.2 s with both running, two threads that are S times as
+  fast as one while they never wait are slower once they wait more than
+  1 - 1/S of the time; 5 points above that, one thread takes over. An idle
+  host shows 1-5% waits, an overloaded one 50% and more.
+- S depends on the guest's work. A trial measures it while the threads
+  waited less than 5%: the slices alternate between one thread and two in
+  5 ms blocks (20 ms each), timed in instructions per second, the waits
+  taken out of the two threads' time; R4.5 booting gives 1.4-1.9. On a
+  busy host such short blocks mislead (a worker woken after a block on one
+  thread is placed on the main thread's core by Linux, or runs boosted on
+  Haiku), so they are not used there. Trials repeat after 1, 2, 4 ... 32 s.
+- With one thread, a probe runs two for 10 ms (settling) plus 40 ms and
+  keeps them if they waited 5 points less than the break-even share; each
+  probe that goes back to one thread doubles the time to the next (1 to
+  16 s).
+
+The worker sleeps while the slices run on one thread, so it takes no core
+then. Measured (R4.5 at 133 MHz booting for 25 emulated seconds,
+unpaced, `bebox-headless`):
+
+| host, busy loops | two threads before | now | one thread |
+|------------------|--------------------|-----|------------|
+| Linux, 6 cores, 0 | 383% | 379-382% | 291% |
+| Linux, 6 cores, 4 | 362% | 351-360% | 290% |
+| Linux, 6 cores, 5 | 201% | 263-282% | 230-286% |
+| Linux, 6 cores, 6 | 182% | 229-237% | 233% |
+| Haiku, 4 cores, 0 | 356-361% | 354-361% | 276% |
+| Haiku, 4 cores, 3 | 190% | 265-275% | 275-278% |
+
+R5 playing an MP3 in the app (100% speed, Haiku, 4 cores): idle, both
+keep up. With 3 cores busy from power on (128 MB), the old build ran at
+5% on average (0.5% at worst; 2 s of sound in 40 s), the new one at 99%
+(84% at worst) without underruns while playing; with the load starting
+during playback (64 MB), 11-37% against 99-101% (one underrun at the switch
+to one thread).
 
 `EmulatorThread` runs the machine in slices against the host clock (speed
 limit in percent, or unlimited), posts commands from the UI between slices

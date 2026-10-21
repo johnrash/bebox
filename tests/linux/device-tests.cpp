@@ -2,11 +2,13 @@
  * BeBox emulator - device tests: the game port A/D converter, the S3
  * Vision864's RAMDAC access, graphics engine and cursor, the Cirrus
  * GD5434's cursor, the NE2000, the SCSI CD-ROM's disc changes, the
- * boot ROM's debug output key and the MPC105's memory banks.
+ * boot ROM's debug output key, the MPC105's memory banks and the threaded
+ * mode's choice of one host thread or two.
  * Copyright 2026, the BeBox emulator authors. MIT License.
  */
 #include "core/board/BootItems.h"
 #include "core/board/Scheduler.h"
+#include "core/board/ThreadGovernor.h"
 #include "core/bus/IoSpace.h"
 #include "core/bus/Mpc105.h"
 #include "core/bus/PciBus.h"
@@ -24,6 +26,7 @@
 #include "core/video/CirrusGd5434.h"
 #include "core/video/S3Vision864.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -848,6 +851,70 @@ TestMemoryBanks()
 	}
 }
 
+
+// Threaded mode (ThreadGovernor): one host thread once the two wait for
+// each other longer than two are faster (the speedup a trial measured on
+// a calm host), probes of two threads backing off while they still wait.
+void
+TestThreadGovernor()
+{
+	ThreadGovernor governor;
+	double now = 100;
+	// 1 ms stretches with both CPUs running on two threads that waited
+	// this share of the time
+	auto both = [&](double seconds, double share) {
+		for (int i = 0; i <= (int)(seconds * 1000 + 0.5); i++) {
+			governor.Waited(0.001 * share);
+			now += 0.001;
+			governor.BothRan(now, 0.001);
+			governor.RunEnded(now);
+		}
+	};
+	// a trial: 0.1 ms slices at these instructions per second
+	auto trial = [&](double oneRate, double twoRate) {
+		for (int i = 0; i < 2000 && governor.Timing(); i++) {
+			double rate = governor.TwoThreads() ? twoRate : oneRate;
+			governor.SliceTimed((u64)(rate / 10000), now, now + 0.0001);
+			now += 0.0001;
+		}
+	};
+	auto runEnded = [&](double seconds) {
+		now += seconds;
+		governor.RunEnded(now);
+	};
+
+	Check(governor.TwoThreads() && !governor.Timing(),
+		"threads: two at first");
+	both(0.2, 0.01);
+	Check(governor.Timing(), "threads: a trial while the threads hardly "
+		"wait");
+	trial(100e6, 150e6);
+	Check(governor.TwoThreads() && !governor.Timing()
+		&& std::fabs(governor.Speedup() - 1.5) < 0.01,
+		"threads: the trial measures the speedup (1.5), two threads");
+	// break-even: waiting a third of the time
+	both(0.2, 0.25);
+	Check(governor.TwoThreads(), "threads: two while waiting 25%");
+	both(0.2, 0.5);
+	Check(!governor.TwoThreads(), "threads: one when waiting 50%");
+	runEnded(0.5);
+	Check(!governor.TwoThreads(), "threads: no probe after 0.5 s");
+	runEnded(0.6);
+	Check(governor.TwoThreads(), "threads: a probe of two after 1 s");
+	both(0.06, 0.5);
+	Check(!governor.TwoThreads(), "threads: one after a probe waiting "
+		"50%");
+	runEnded(1.1);
+	Check(!governor.TwoThreads(), "threads: no probe 1 s later");
+	runEnded(1);
+	Check(governor.TwoThreads(), "threads: the next probe after 2 s");
+	both(0.06, 0.1);
+	Check(governor.TwoThreads() && !governor.Timing(),
+		"threads: two after a probe waiting 10%");
+	both(0.3, 0.1);
+	Check(governor.TwoThreads(), "threads: two keep waiting 10%");
+}
+
 }	// namespace
 
 
@@ -865,6 +932,7 @@ main()
 	TestCdChange();
 	TestDebugKeyRelease();
 	TestMemoryBanks();
+	TestThreadGovernor();
 	printf("%d failures\n", sFailures);
 	return sFailures == 0 ? 0 : 1;
 }

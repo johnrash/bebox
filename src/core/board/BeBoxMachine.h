@@ -134,7 +134,11 @@ private:
 			void				_StartWorker();
 			void				_StopWorker();
 			void				_RunWorker();
-			void				_RunSliceThreaded(u64 sliceEnd);
+			bool				_RunSliceThreaded(u64 sliceEnd,
+									bool continued);
+			void				_HandOver(u64 sliceEnd, bool continued);
+			double				_BothRan(double start);
+			void				_RunSliceOneThread(u64 sliceEnd);
 			void				_CheckKernelEntry();
 			void				_DebugOutputStarted();
 
@@ -175,7 +179,9 @@ private:
 			bool				fDebugKeyHeld = false;
 
 			// Threaded mode (MachineConfig::threadPerCpu): CPU 1 runs on
-			// a worker thread, CPU 0 on the thread calling RunFor().
+			// a worker thread, CPU 0 on the thread calling RunFor(), or
+			// both on that thread while the host's cores are busy
+			// (ThreadGovernor).
 			struct Worker;
 			std::unique_ptr<Worker> fWorker;
 			// a reset asked for by a device while the CPUs run

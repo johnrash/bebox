@@ -231,8 +231,11 @@ half as long on the 133 MHz one.
   Monitor, and restart when it is sent again.
 - The two processors run on two host cores when both are busy
   (**Preferences > Advanced**, on by default): up to nearly twice as fast,
-  which the 133 MHz model needs on slower computers. The status line shows
-  the speed in percent of a real BeBox.
+  which the 133 MHz model needs on slower computers. While other programs
+  keep the computer's cores busy, two cores are slower than one (each
+  processor keeps waiting for the other), so BeBox then runs both on one
+  core and tries two again every few seconds. The status line shows the
+  speed in percent of a real BeBox.
 - **Tools > Serial console** shows a serial port connected to a console.
 - **View** shows the screen at actual or double size or fitted to the
   window, and shows or hides the LEDs. **Full screen** (or the host key
