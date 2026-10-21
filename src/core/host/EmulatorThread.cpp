@@ -77,6 +77,14 @@ EmulatorThread::Post(Command command)
 
 
 void
+EmulatorThread::DiscardCommands()
+{
+	std::lock_guard<std::mutex> lock(fLock);
+	fCommands.clear();
+}
+
+
+void
 EmulatorThread::SetPaused(bool paused)
 {
 	fPaused = paused;

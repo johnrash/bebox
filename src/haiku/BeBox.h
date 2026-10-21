@@ -26,6 +26,8 @@ enum {
 	kMsgFrame = 'fram',
 	kMsgScale = 'scal',
 	kMsgShowLeds = 'tled',
+	kMsgFullScreen = 'fuls',
+	kMsgFullScreenScale = 'fssc',
 	kMsgLedStyle = 'lsty',
 	kMsgInsertFloppy = 'insf',
 	kMsgFloppyChosen = 'flch',
@@ -35,6 +37,8 @@ enum {
 	kMsgEjectCd = 'ejcc',
 	kMsgCdEjected = 'cdej',
 	kMsgMediaChanged = 'mdch',
+	kMsgSharedFoldersReady = 'shrd',
+	kMsgSharedFoldersSynced = 'shsy',
 	kMsgCaptureChanged = 'capt',
 	kMsgBootWithMenu = 'btmn',
 	kMsgBootWithDebug = 'btdb',
@@ -51,6 +55,14 @@ enum {
 enum LedStyle {
 	kLedStyleAuthentic = 0,		// lime green load and power, amber disk
 	kLedStyleRedGreen = 1		// green load with red top, red disk
+};
+
+// The picture in full screen (a picture larger than the screen always
+// fits it).
+enum FullScreenScale {
+	kFullScreenFill = 0,		// fills the screen, smoothly scaled
+	kFullScreenWhole = 1,		// the largest whole multiple that fits
+	kFullScreenActual = 2		// 1:1
 };
 
 #endif	// BEBOX_APP_DEFS_H

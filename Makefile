@@ -13,6 +13,7 @@ SRCS = \
 	src/haiku/App.cpp \
 	src/haiku/HaikuAttributes.cpp \
 	src/haiku/HaikuAudio.cpp \
+	src/haiku/JobQueue.cpp \
 	src/haiku/LedColumnView.cpp \
 	src/haiku/MachineWindow.cpp \
 	src/haiku/MediaStatusView.cpp \

@@ -55,7 +55,10 @@ public:
 			void				Stop();
 			bool				IsRunning() const { return fThread.joinable(); }
 
+			// Commands posted before Start() run when the thread starts.
 			void				Post(Command command);
+			// Drops the commands not run yet.
+			void				DiscardCommands();
 			void				SetPaused(bool paused);
 			bool				IsPaused() const { return fPaused; }
 			// 100 = real time, 0 = as fast as possible.

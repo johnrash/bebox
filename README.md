@@ -235,7 +235,13 @@ half as long on the 133 MHz one.
   the speed in percent of a real BeBox.
 - **Tools > Serial console** shows a serial port connected to a console.
 - **View** shows the screen at actual or double size or fitted to the
-  window, and shows or hides the LEDs.
+  window, and shows or hides the LEDs. **Full screen** (or the host key
+  with F, also while the BeBox runs) leaves only the screen, and the LEDs
+  at the sides if they are shown; the host key with F again brings the
+  window back. **Full screen scaling** makes the screen fill the display
+  in its proportions (smoothly scaled), or keeps its pixels sharp: the
+  largest whole multiple that fits, or actual size (1:1), with black
+  around it.
 
 ## Network
 
@@ -258,7 +264,10 @@ go back to the folder: new and changed files, attributes, deletions. A file
 changed on both sides meanwhile keeps the Haiku version, and BeOS's is saved
 next to it as "NAME (BeBox)". If BeOS did not shut down cleanly, the volume
 is kept and given back to BeOS at the next power on, so that it can repair
-it first. As the whole folder is copied at every power on, keep it small.
+it first. As the whole folder is copied at every power on, keep it small:
+the BeBox starts once the copy is done (the status line says so meanwhile,
+and the window stays usable), and quitting waits for BeOS's changes to be
+back in the folder.
 
 ## Disk images
 
@@ -300,6 +309,7 @@ hey BeBox get LedLevels of Window BeBox        # left, right (0-15)
 hey BeBox get SerialLog 4 of Window BeBox      # a console port's output
 hey BeBox set Floppy of Window BeBox to /path/disk.img
 hey BeBox set CdRom of Window BeBox to /path/disc.iso   # "" ejects
+hey BeBox set FullScreen of Window BeBox to true
 hey BeBox type of Window BeBox with text=ls    # types on the keyboard
 hey BeBox shot of Window BeBox with path=/tmp/screen.png
 ```

@@ -4,6 +4,8 @@
  */
 #include "Settings.h"
 
+#include "BeBox.h"
+
 #include <Directory.h>
 #include <Entry.h>
 #include <File.h>
@@ -70,6 +72,7 @@ WriteArchive(const char* path, const BMessage& archive)
 Settings::Settings()
 	:
 	scale(1),
+	fullScreenScale(kFullScreenFill),
 	showLeds(true),
 	ledStyle(0),
 	hostKey(kHostKeyRightControl),
@@ -359,6 +362,9 @@ Settings::Load()
 	BString string;
 	if (archive.FindInt32("scale", &value) == B_OK)
 		scale = value;
+	if (archive.FindInt32("full_screen_scale", &value) == B_OK
+		&& value >= kFullScreenFill && value <= kFullScreenActual)
+		fullScreenScale = value;
 	if (archive.FindBool("show_leds", &flag) == B_OK)
 		showLeds = flag;
 	if (archive.FindInt32("led_style", &value) == B_OK)
@@ -396,6 +402,7 @@ Settings::Save() const
 	BMessage archive('BBxs');
 	archive.AddString("profile", profile);
 	archive.AddInt32("scale", scale);
+	archive.AddInt32("full_screen_scale", fullScreenScale);
 	archive.AddBool("show_leds", showLeds);
 	archive.AddInt32("led_style", ledStyle);
 	archive.AddInt32("host_key", hostKey);

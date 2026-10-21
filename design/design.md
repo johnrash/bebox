@@ -205,7 +205,10 @@ attribute hashes that differ, entries that disappeared), keeping a "NAME
 (BeBox)" copy when the host changed the same file. Attributes of numeric
 types are byte swapped between the little endian host and the big endian
 volume. The front ends supply the host's attributes (`HostAttributes`:
-`HaikuAttributes` on Haiku).
+`HaikuAttributes` on Haiku). The Haiku app copies the folders on a thread of
+its own (`JobQueue`, one job after the other, so a folder is back before it
+is copied again) and starts the machine when they are ready; quitting waits
+for the queue.
 
 ## The Haiku application
 

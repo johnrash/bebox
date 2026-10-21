@@ -29,6 +29,7 @@
 #include <File.h>
 #include <FilePanel.h>
 #include <FindDirectory.h>
+#include <GroupView.h>
 #include <Joystick.h>
 #include <LayoutBuilder.h>
 #include <Menu.h>
@@ -37,11 +38,13 @@
 #include <MessageRunner.h>
 #include <Path.h>
 #include <PropertyInfo.h>
+#include <Screen.h>
 #include <StringList.h>
 #include <StringView.h>
 #include <TranslatorRoster.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <unistd.h>
@@ -49,17 +52,20 @@
 static const uint32 kMsgTick = 'tick';
 static const uint32 kMsgJoystickPoll = 'joyp';
 static const uint32 kMsgHeldKey = 'hold';
-// The host key toggles the mouse capture and is not passed to the BeBox
-// (key code, modifier bit or 0), by Settings::hostKey.
-static const struct {
+// The host key toggles the mouse capture (with F: full screen) and is not
+// passed to the BeBox (key code, modifier bit or 0), by Settings::hostKey.
+struct HostKeyCode {
 	uint32 key;
 	uint32 modifier;
-} kHostKeys[4] = {
+};
+static const HostKeyCode kHostKeys[4] = {
 	{ 0x60, B_RIGHT_CONTROL_KEY },
 	{ 0x5f, B_RIGHT_COMMAND_KEY },		// right Alt
 	{ 0x67, B_RIGHT_OPTION_KEY },		// right Windows key
 	{ 0x68, 0 }							// Menu
 };
+static const char* const kHostKeyNames[4] = { "right Ctrl", "right Alt",
+	"right Windows key", "Menu key" };
 
 
 MachineWindow::MachineWindow(Settings& settings)
@@ -67,7 +73,13 @@ MachineWindow::MachineWindow(Settings& settings)
 	BWindow(settings.windowFrame, kAppName, B_TITLED_WINDOW,
 		B_ASYNCHRONOUS_CONTROLS | B_AUTO_UPDATE_SIZE_LIMITS),
 	fSettings(settings),
+	fFolderStarts(0),
+	fFolderSyncs(0),
+	fStarting(false),
 	fConsoleMenu(nullptr),
+	fFullScreen(false),
+	fHostKeyDown(false),
+	fHostComboUsed(false),
 	fFloppyPanel(nullptr),
 	fCdItemsIndex(0),
 	fCdPanel(nullptr),
@@ -82,6 +94,7 @@ MachineWindow::MachineWindow(Settings& settings)
 		fConsoles[i] = new ConsoleSerial(i);
 
 	BMenuBar* menuBar = new BMenuBar("menu");
+	fMenuBar = menuBar;
 	menuBar->AddItem(_BuildMachineMenu());
 	menuBar->AddItem(_BuildMediaMenu());
 	menuBar->AddItem(_BuildViewMenu());
@@ -104,6 +117,7 @@ MachineWindow::MachineWindow(Settings& settings)
 	fScreen->SetMouseOptions(fSettings.mouseSpeed,
 		fSettings.swapMouseButtons, fSettings.captureOnClick);
 	fScreen->SetScale(settings.scale);
+	fScreen->SetFullScreenScale(settings.fullScreenScale);
 	fLeftLeds = new LedColumnView("cpu0 leds", false);
 	fRightLeds = new LedColumnView("cpu1 leds", true);
 	fLeftLeds->SetStyle(settings.ledStyle);
@@ -111,6 +125,7 @@ MachineWindow::MachineWindow(Settings& settings)
 	fStatus = new BStringView("status", "Powered off");
 	fStatus->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
 	fMedia = new MediaStatusView();
+	fStatusBar = new BGroupView(B_HORIZONTAL, 0);
 
 	BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
 		.Add(menuBar)
@@ -119,7 +134,7 @@ MachineWindow::MachineWindow(Settings& settings)
 			.Add(fScreen)
 			.Add(fRightLeds)
 		.End()
-		.AddGroup(B_HORIZONTAL, 0)
+		.AddGroup(fStatusBar)
 			.SetInsets(B_USE_SMALL_SPACING, 2, B_USE_SMALL_SPACING, 2)
 			.Add(fStatus)
 			.Add(fMedia)
@@ -142,6 +157,7 @@ MachineWindow::~MachineWindow()
 	fEmulator.Stop();
 	fNetwork.reset();
 	_SyncSharedFolders(false);
+	_ReplyToStart(B_CANCELED);
 	fSerialBackends.clear();
 	for (int i = 0; i < 4; i++) {
 		if (fConsoleWindows[i].IsValid()) {
@@ -238,7 +254,7 @@ MachineWindow::SwitchProfile(const char* name, bool create)
 		_NewProfile(name);
 		return fSettings.profile == name;
 	}
-	bool wasPowered = fPowered;
+	bool wasPowered = fPowered || fStarting;
 	_ClosePreferences();
 	PowerOff();
 	status_t status = fSettings.SwitchProfile(name);
@@ -419,6 +435,23 @@ BMenu*
 MachineWindow::_BuildViewMenu()
 {
 	BMenu* menu = new BMenu("View");
+	// the label names the host key (_UpdateMenus)
+	fFullScreenItem = new BMenuItem("Full screen",
+		new BMessage(kMsgFullScreen));
+	menu->AddItem(fFullScreenItem);
+	BMenu* fullScreenScale = new BMenu("Full screen scaling");
+	static const char* const kFullScreenScaleNames[3] = { "Fill the screen",
+		"Largest whole multiple (sharp)", "Actual size (1:1)" };
+	for (int32 i = 0; i < 3; i++) {
+		BMessage* message = new BMessage(kMsgFullScreenScale);
+		message->AddInt32("scale", i);
+		fFullScreenScaleItems[i] = new BMenuItem(kFullScreenScaleNames[i],
+			message);
+		fullScreenScale->AddItem(fFullScreenScaleItems[i]);
+	}
+	fullScreenScale->SetRadioMode(true);
+	menu->AddItem(fullScreenScale);
+	menu->AddSeparatorItem();
 	static const char* const kScaleNames[3] = { "Fit window", "Actual size",
 		"Double size" };
 	for (int32 i = 0; i < 3; i++) {
@@ -453,11 +486,29 @@ MachineWindow::_BuildViewMenu()
 bool
 MachineWindow::PowerOn()
 {
-	if (fPowered)
+	if (fPowered || fStarting)
 		return true;
-	std::string error;
+	// what was posted while the machine was off: it starts from the
+	// settings
+	fEmulator.DiscardCommands();
 	bebox::MachineConfig config = fSettings.MachineConfigForRun();
-	_PrepareSharedFolders(config);
+	for (const bebox::MachineConfig::ScsiTarget& target : config.scsi) {
+		if (target.kind == bebox::MachineConfig::ScsiTarget::kSharedFolder) {
+			fStarting = true;
+			_PrepareSharedFolders(config);
+			_UpdateMenus();
+			_UpdateStatus();
+			return true;
+		}
+	}
+	return _StartMachine(config);
+}
+
+
+bool
+MachineWindow::_StartMachine(const bebox::MachineConfig& config)
+{
+	std::string error;
 	ScreenView* screen = fScreen;
 	// serial ports
 	fSerialBackends.clear();
@@ -537,6 +588,8 @@ MachineWindow::PowerOn()
 				"preferences.");
 		BAlert* alert = new BAlert(kAppName, text.String(), "OK");
 		alert->Go(nullptr);
+		// nothing ran on the shared folders' volumes
+		fSharedFolders.clear();
 		return false;
 	}
 	fEmulator.SetSpeedLimit(fSettings.speedLimit);
@@ -551,6 +604,16 @@ MachineWindow::PowerOn()
 void
 MachineWindow::PowerOff()
 {
+	if (fStarting) {
+		// the shared folders are still being copied: the machine does not
+		// start (_SharedFoldersReady drops them)
+		fStarting = false;
+		fEmulator.DiscardCommands();
+		_ReplyToStart(B_CANCELED);
+		_UpdateMenus();
+		_UpdateStatus();
+		return;
+	}
 	if (!fPowered)
 		return;
 	fEmulator.Stop();
@@ -572,13 +635,21 @@ MachineWindow::PowerOff()
 void
 MachineWindow::_UpdateMenus()
 {
-	fPowerItem->SetLabel(fPowered ? "Power off" : "Power on");
-	fPowerItem->Message()->what = fPowered ? kMsgPowerOff : kMsgPowerOn;
+	bool on = fPowered || fStarting;
+	fPowerItem->SetLabel(on ? "Power off" : "Power on");
+	fPowerItem->Message()->what = on ? kMsgPowerOff : kMsgPowerOn;
 	fPauseItem->SetMarked(fEmulator.IsPaused());
 	fCtrlAltDeleteItem->SetEnabled(fPowered);
 	for (int32 i = 0; i < 3; i++)
 		fScaleItems[i]->SetMarked(fSettings.scale == (i == 0 ? 0 : i));
 	fShowLedsItem->SetMarked(fSettings.showLeds);
+	BString fullScreen;
+	fullScreen.SetToFormat("Full screen (%s+F)",
+		kHostKeyNames[_HostKeyIndex()]);
+	fFullScreenItem->SetLabel(fullScreen.String());
+	fFullScreenItem->SetMarked(fFullScreen);
+	for (int32 i = 0; i < 3; i++)
+		fFullScreenScaleItems[i]->SetMarked(fSettings.fullScreenScale == i);
 	// the Hobbit prototype's kernel drives no front panel lights
 	fShowLedsItem->SetEnabled(
 		fSettings.machine.model != bebox::MachineConfig::kHobbit);
@@ -619,9 +690,16 @@ void
 MachineWindow::_UpdateStatus()
 {
 	BString text;
-	if (!fPowered) {
+	if (fStarting) {
+		text.SetToFormat("%s  \xe2\x80\x94  starting: copying the shared "
+			"folder" B_UTF8_ELLIPSIS, fSettings.profile.String());
+	} else if (!fPowered) {
 		text.SetToFormat("%s  \xe2\x80\x94  powered off",
 			fSettings.profile.String());
+		if (fFolderSyncs > 0) {
+			text << "  \xe2\x80\x94  copying BeOS's changes to the shared "
+				"folder" B_UTF8_ELLIPSIS;
+		}
 	} else {
 		bebox::EmulatorThread::Status status = fEmulator.GetStatus();
 		fLeftLeds->SetLevels(status.leds[0], true, 0);
@@ -636,8 +714,6 @@ MachineWindow::_UpdateStatus()
 			status.mips);
 		if (status.paused)
 			text << "  (paused)";
-		static const char* const kHostKeyNames[4] = { "right Ctrl",
-			"right Alt", "right Windows key", "Menu key" };
 		const char* hostKey = kHostKeyNames[_HostKeyIndex()];
 		if (fScreen->IsMouseCaptured())
 			text << "  \xe2\x80\x94  " << hostKey << " releases the mouse";
@@ -692,7 +768,7 @@ MachineWindow::_UpdateStatus()
 void
 MachineWindow::_FitWindow()
 {
-	if (fSettings.scale == 0)
+	if (fSettings.scale == 0 || fFullScreen)
 		return;
 	InvalidateLayout();
 	ResizeToPreferred();
@@ -741,12 +817,16 @@ MachineWindow::_ModifiersChanged(uint32 old, uint32 now)
 	};
 	static const Modifier kModifiers[] = {
 		{ B_LEFT_SHIFT_KEY, 0x4b }, { B_RIGHT_SHIFT_KEY, 0x56 },
-		{ B_LEFT_CONTROL_KEY, 0x5c },
+		{ B_LEFT_CONTROL_KEY, 0x5c }, { B_RIGHT_CONTROL_KEY, 0x60 },
 		{ B_LEFT_COMMAND_KEY, 0x5d }, { B_RIGHT_COMMAND_KEY, 0x5f },
 		{ B_LEFT_OPTION_KEY, 0x66 }, { B_RIGHT_OPTION_KEY, 0x67 },
 		{ B_MENU_KEY, 0x68 }
 	};
+	// the host key stays with Haiku
+	uint32 hostKey = kHostKeys[_HostKeyIndex()].key;
 	for (const Modifier& modifier : kModifiers) {
+		if (modifier.key == hostKey)
+			continue;
 		bool was = (old & modifier.mask) != 0;
 		bool is = (now & modifier.mask) != 0;
 		if (was != is)
@@ -766,9 +846,11 @@ MachineWindow::_ModifiersChanged(uint32 old, uint32 now)
 			_SendKey(lock.key, false);
 		}
 	}
-	// A modifier host key toggles the mouse capture when released.
+	// A modifier host key toggles the mouse capture when released (unless
+	// it made a combination).
 	uint32 modifier = kHostKeys[_HostKeyIndex()].modifier;
-	if (modifier != 0 && (old & modifier) != 0 && (now & modifier) == 0)
+	if (modifier != 0 && (old & modifier) != 0 && (now & modifier) == 0
+		&& !fHostComboUsed)
 		fScreen->SetMouseCaptured(!fScreen->IsMouseCaptured());
 }
 
@@ -806,7 +888,8 @@ MachineWindow::_HandleKey(BMessage* message)
 			if (message->FindInt32("key", &key) != B_OK)
 				return false;
 			if (key == (int32)kHostKeys[_HostKeyIndex()].key) {
-				if (kHostKeys[_HostKeyIndex()].modifier == 0)
+				if (kHostKeys[_HostKeyIndex()].modifier == 0
+					&& !fHostComboUsed)
 					fScreen->SetMouseCaptured(!fScreen->IsMouseCaptured());
 				return true;
 			}
@@ -828,22 +911,112 @@ MachineWindow::_HandleKey(BMessage* message)
 }
 
 
+// Whether the host key is down, from a key or modifiers message.
+void
+MachineWindow::_TrackHostKey(BMessage* message)
+{
+	const HostKeyCode& host = kHostKeys[_HostKeyIndex()];
+	bool down = fHostKeyDown;
+	if (host.modifier != 0) {
+		int32 modifiers;
+		if (message->FindInt32("modifiers", &modifiers) == B_OK)
+			down = (modifiers & host.modifier) != 0;
+	} else if (message->GetInt32("key", -1) == (int32)host.key) {
+		down = message->what == B_KEY_DOWN
+			|| message->what == B_UNMAPPED_KEY_DOWN;
+	}
+	if (down && !fHostKeyDown)
+		fHostComboUsed = false;
+	fHostKeyDown = down;
+}
+
+
+// The host key with F toggles full screen, also while the machine is off;
+// the F does not reach the BeBox.
+bool
+MachineWindow::_HandleHostCombination(BMessage* message)
+{
+	if (message->what != B_KEY_DOWN || !fHostKeyDown)
+		return false;
+	int32 character = message->GetInt32("raw_char", 0);
+	if (character != 'f' && character != 'F')
+		return false;
+	fHostComboUsed = true;
+	if (message->GetInt32("be:key_repeat", 0) == 0)
+		_SetFullScreen(!fFullScreen);
+	return true;
+}
+
+
 void
 MachineWindow::DispatchMessage(BMessage* message, BHandler* handler)
 {
-	if (fPowered && IsActive()) {
+	if (IsActive()) {
 		switch (message->what) {
 			case B_KEY_DOWN:
 			case B_KEY_UP:
 			case B_UNMAPPED_KEY_DOWN:
 			case B_UNMAPPED_KEY_UP:
 			case B_MODIFIERS_CHANGED:
-				if (_HandleKey(message))
+				_TrackHostKey(message);
+				if (_HandleHostCombination(message))
+					return;
+				if (fPowered && _HandleKey(message))
 					return;
 				break;
 		}
 	}
 	BWindow::DispatchMessage(message, handler);
+}
+
+
+// Full screen: no border, menu bar or status line; the screen (and the
+// LEDs, if shown) fill the display. The window frame comes back after.
+void
+MachineWindow::_SetFullScreen(bool fullScreen)
+{
+	if (fullScreen == fFullScreen)
+		return;
+	fFullScreen = fullScreen;
+	if (fullScreen) {
+		fWindowedFrame = Frame();
+		fMenuBar->Hide();
+		fStatusBar->Hide();
+		fScreen->SetFullScreen(true);
+		SetLook(B_NO_BORDER_WINDOW_LOOK);
+		SetFlags(Flags() | B_NOT_MOVABLE | B_NOT_RESIZABLE);
+		BRect frame = BScreen(this).Frame();
+		MoveTo(frame.LeftTop());
+		ResizeTo(frame.Width(), frame.Height());
+		BString hint;
+		hint.SetToFormat("%s+F leaves full screen",
+			kHostKeyNames[_HostKeyIndex()]);
+		hint.SetByteAt(0, toupper(hint.ByteAt(0)));
+		fScreen->ShowHint(hint.String());
+	} else {
+		SetFlags(Flags() & ~(B_NOT_MOVABLE | B_NOT_RESIZABLE));
+		SetLook(B_TITLED_WINDOW_LOOK);
+		fMenuBar->Show();
+		fStatusBar->Show();
+		fScreen->SetFullScreen(false);
+		fScreen->ShowHint("");
+		MoveTo(fWindowedFrame.LeftTop());
+		ResizeTo(fWindowedFrame.Width(), fWindowedFrame.Height());
+		// the BeBox may have changed its resolution meanwhile
+		_FitWindow();
+	}
+	_UpdateMenus();
+}
+
+
+void
+MachineWindow::ScreenChanged(BRect frame, color_space mode)
+{
+	if (fFullScreen) {
+		MoveTo(frame.LeftTop());
+		ResizeTo(frame.Width(), frame.Height());
+	}
+	BWindow::ScreenChanged(frame, mode);
 }
 
 
@@ -923,7 +1096,24 @@ MachineWindow::MessageReceived(BMessage* message)
 			break;
 		case kMsgPowerOn:
 			PowerOn();
+			// a scripted power on is answered when the machine runs
+			if (fStarting && message->IsSourceWaiting()) {
+				fStartReplies.push_back(DetachCurrentMessage());
+				return;
+			}
 			break;
+		case kMsgSharedFoldersReady:
+			_SharedFoldersReady(message);
+			break;
+		case kMsgSharedFoldersSynced:
+		{
+			fFolderSyncs--;
+			const char* report;
+			if (message->FindString("report", &report) == B_OK)
+				(new BAlert(kAppName, report, "OK"))->Go(nullptr);
+			_UpdateStatus();
+			break;
+		}
 		case kMsgPowerOff:
 			PowerOff();
 			break;
@@ -1018,6 +1208,19 @@ MachineWindow::MessageReceived(BMessage* message)
 			_UpdateMenus();
 			_FitWindow();
 			break;
+		case kMsgFullScreen:
+			_SetFullScreen(!fFullScreen);
+			break;
+		case kMsgFullScreenScale:
+		{
+			int32 scale = message->GetInt32("scale", kFullScreenFill);
+			if (scale < kFullScreenFill || scale > kFullScreenActual)
+				break;
+			fSettings.fullScreenScale = scale;
+			fScreen->SetFullScreenScale(scale);
+			_UpdateMenus();
+			break;
+		}
 		case kMsgShowLeds:
 			fSettings.showLeds = !fSettings.showLeds;
 			_UpdateLeds();
@@ -1225,7 +1428,7 @@ MachineWindow::MessageReceived(BMessage* message)
 		case kMsgResetFlash:
 		case kMsgClearNvram:
 		{
-			bool wasPowered = fPowered;
+			bool wasPowered = fPowered || fStarting;
 			PowerOff();
 			BString path = message->what == kMsgResetFlash
 				? fSettings.FlashPath() : fSettings.NvramPath();
@@ -1245,7 +1448,8 @@ MachineWindow::MessageReceived(BMessage* message)
 				fSettings.swapMouseButtons, fSettings.captureOnClick);
 			if (_UpdateLeds())
 				_FitWindow();
-			bool restart = message->GetBool("restart", false) && fPowered;
+			bool restart = message->GetBool("restart", false)
+				&& (fPowered || fStarting);
 			if (restart)
 				PowerOff();
 			if (message->GetBool("reset_flash", false))
@@ -1341,6 +1545,9 @@ static property_info kProperties[] = {
 		0, { B_STRING_TYPE } },
 	{ "Profiles", { B_GET_PROPERTY, 0 }, { B_DIRECT_SPECIFIER, 0 },
 		"The names of the machine profiles.", 0, { B_STRING_TYPE } },
+	{ "FullScreen", { B_GET_PROPERTY, B_SET_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, 0 },
+		"Whether the window fills the screen.", 0, { B_BOOL_TYPE } },
 	{ 0 }
 };
 
@@ -1386,9 +1593,15 @@ MachineWindow::_HandleScripting(BMessage* message)
 			bool on;
 			if (message->FindBool("data", &on) != B_OK)
 				result = B_BAD_VALUE;
-			else if (on && !fPowered)
-				result = PowerOn() ? B_OK : B_ERROR;
-			else if (!on && fPowered)
+			else if (on && !fPowered) {
+				if (!PowerOn())
+					result = B_ERROR;
+				else if (fStarting) {
+					// answered when the machine runs
+					fStartReplies.push_back(DetachCurrentMessage());
+					return true;
+				}
+			} else if (!on && (fPowered || fStarting))
 				PowerOff();
 		} else
 			reply.AddBool("result", fPowered);
@@ -1451,6 +1664,15 @@ MachineWindow::_HandleScripting(BMessage* message)
 				_InsertFloppy(path);
 		} else
 			reply.AddString("result", fSettings.machine.floppyImage.c_str());
+	} else if (strcmp(property, "FullScreen") == 0) {
+		if (set) {
+			bool on;
+			if (message->FindBool("data", &on) != B_OK)
+				result = B_BAD_VALUE;
+			else
+				_SetFullScreen(on);
+		} else
+			reply.AddBool("result", fFullScreen);
 	} else if (strcmp(property, "CdRom") == 0) {
 		std::vector<int> drives = _CdDrives();
 		int32 id = form == B_INDEX_SPECIFIER ? specifier.GetInt32("index", -1)
@@ -1568,58 +1790,138 @@ MachineWindow::_PollJoysticks()
 }
 
 
-// Shared folders: a BFS volume per folder, built at power on in the
-// settings folder; BeOS's changes go back to the folder at power off.
-void
-MachineWindow::_PrepareSharedFolders(bebox::MachineConfig& config)
-{
-	fSharedFolders.clear();
+// Shared folders: a BFS volume per folder, built in the settings folder
+// at power on, BeOS's changes back to the folder at power off. The copies
+// take seconds with a big folder: they run on fFolderJobs, one after the
+// other (a folder goes back before it is copied again), and the machine
+// starts when its folders are ready (_SharedFoldersReady).
+struct MachineWindow::FolderStart {
+	int32 generation = 0;
+	bebox::MachineConfig config;	// the volumes' images in place
+	std::string profileDirectory;
+	std::vector<std::unique_ptr<bebox::SharedFolder> > folders;
 	BString messages;
-	for (int id = 0; id < 7; id++) {
-		bebox::MachineConfig::ScsiTarget& target = config.scsi[id];
-		if (target.kind != bebox::MachineConfig::ScsiTarget::kSharedFolder)
-			continue;
-		BString image = fSettings.ProfileDirectory();
-		image << "/shared-scsi" << id << ".qcow2";
-		std::unique_ptr<bebox::SharedFolder> share(new bebox::SharedFolder(
-			target.image, image.String(), &fHostAttributes));
-		std::string report;
-		std::string error;
-		if (!share->Prepare(report, error)) {
-			messages << error.c_str() << "\n\n";
-			target.kind = bebox::MachineConfig::ScsiTarget::kNone;
-			continue;
+};
+
+
+void
+MachineWindow::_PrepareSharedFolders(const bebox::MachineConfig& config)
+{
+	std::shared_ptr<FolderStart> start(new FolderStart);
+	start->generation = ++fFolderStarts;
+	start->config = config;
+	start->profileDirectory = fSettings.ProfileDirectory().String();
+	fFolderStart = start;
+	HaikuAttributes* attributes = &fHostAttributes;
+	BMessenger window(this);
+	fFolderJobs.Add([start, attributes, window]() {
+		for (int id = 0; id < 7; id++) {
+			bebox::MachineConfig::ScsiTarget& target = start->config.scsi[id];
+			if (target.kind
+					!= bebox::MachineConfig::ScsiTarget::kSharedFolder)
+				continue;
+			BString image = start->profileDirectory.c_str();
+			image << "/shared-scsi" << id << ".qcow2";
+			std::unique_ptr<bebox::SharedFolder> share(
+				new bebox::SharedFolder(target.image, image.String(),
+					attributes));
+			std::string report;
+			std::string error;
+			if (!share->Prepare(report, error)) {
+				start->messages << error.c_str() << "\n\n";
+				target.kind = bebox::MachineConfig::ScsiTarget::kNone;
+				continue;
+			}
+			if (!report.empty())
+				start->messages << report.c_str() << "\n\n";
+			target.image = image.String();
+			target.readOnly = false;
+			start->folders.push_back(std::move(share));
 		}
-		if (!report.empty())
-			messages << report.c_str() << "\n\n";
-		target.image = image.String();
-		target.readOnly = false;
-		fSharedFolders.push_back(std::move(share));
-	}
-	if (messages.Length() > 0) {
-		messages.Trim();
-		(new BAlert(kAppName, messages.String(), "OK"))->Go(nullptr);
-	}
+		BMessage ready(kMsgSharedFoldersReady);
+		ready.AddInt32("generation", start->generation);
+		window.SendMessage(&ready);
+	});
 }
 
 
 void
+MachineWindow::_SharedFoldersReady(BMessage* message)
+{
+	std::shared_ptr<FolderStart> start = fFolderStart;
+	if (!start || message->GetInt32("generation", -1) != start->generation)
+		return;
+	fFolderStart.reset();
+	// powered off meanwhile: nothing ran on the volumes, they are dropped
+	if (!fStarting)
+		return;
+	fStarting = false;
+	fSharedFolders = std::move(start->folders);
+	if (start->messages.Length() > 0) {
+		start->messages.Trim();
+		(new BAlert(kAppName, start->messages.String(), "OK"))->Go(nullptr);
+	}
+	// the floppy and CDs changed meanwhile go in
+	bebox::MachineConfig& config = start->config;
+	config.floppyImage = fSettings.machine.floppyImage;
+	config.floppyWriteProtected = fSettings.machine.floppyWriteProtected;
+	for (int id = 0; id < 7; id++) {
+		if (config.scsi[id].kind == bebox::MachineConfig::ScsiTarget::kCdRom
+			&& fSettings.machine.scsi[id].kind
+				== bebox::MachineConfig::ScsiTarget::kCdRom)
+			config.scsi[id].image = fSettings.machine.scsi[id].image;
+	}
+	_ReplyToStart(_StartMachine(config) ? B_OK : B_ERROR);
+	_UpdateMenus();
+	_UpdateStatus();
+}
+
+
+// BeOS's changes go back to the folders (the machine has stopped).
+void
 MachineWindow::_SyncSharedFolders(bool interactive)
 {
-	BString messages;
-	for (auto& share : fSharedFolders) {
-		std::string report;
-		std::string error;
-		if (!share->Sync(report, error))
-			messages << error.c_str() << "\n\n";
-		else if (!report.empty())
-			messages << report.c_str() << "\n\n";
-	}
+	if (fSharedFolders.empty())
+		return;
+	std::shared_ptr<std::vector<std::unique_ptr<bebox::SharedFolder> > >
+		folders(new std::vector<std::unique_ptr<bebox::SharedFolder> >(
+			std::move(fSharedFolders)));
 	fSharedFolders.clear();
-	if (interactive && messages.Length() > 0) {
-		messages.Trim();
-		(new BAlert(kAppName, messages.String(), "OK"))->Go(nullptr);
+	fFolderSyncs++;
+	BMessenger window(this);
+	fFolderJobs.Add([folders, interactive, window]() {
+		BString messages;
+		for (auto& share : *folders) {
+			std::string report;
+			std::string error;
+			if (!share->Sync(report, error))
+				messages << error.c_str() << "\n\n";
+			else if (!report.empty())
+				messages << report.c_str() << "\n\n";
+		}
+		folders->clear();
+		BMessage done(kMsgSharedFoldersSynced);
+		if (interactive && messages.Length() > 0)
+			done.AddString("report", messages.Trim());
+		window.SendMessage(&done);
+	});
+}
+
+
+void
+MachineWindow::_ReplyToStart(status_t status)
+{
+	for (BMessage* message : fStartReplies) {
+		BMessage reply(B_REPLY);
+		if (status != B_OK) {
+			reply.what = B_MESSAGE_NOT_UNDERSTOOD;
+			reply.AddString("message", strerror(status));
+		}
+		reply.AddInt32("error", status);
+		message->SendReply(&reply);
+		delete message;
 	}
+	fStartReplies.clear();
 }
 
 
@@ -1780,7 +2082,8 @@ MachineWindow::_PressKeyCombination(const std::vector<const char*>& keys)
 void
 MachineWindow::FrameMoved(BPoint origin)
 {
-	fSettings.windowFrame = Frame();
+	if (!fFullScreen)
+		fSettings.windowFrame = Frame();
 	BWindow::FrameMoved(origin);
 }
 
@@ -1788,7 +2091,8 @@ MachineWindow::FrameMoved(BPoint origin)
 void
 MachineWindow::FrameResized(float width, float height)
 {
-	fSettings.windowFrame = Frame();
+	if (!fFullScreen)
+		fSettings.windowFrame = Frame();
 	BWindow::FrameResized(width, height);
 }
 
@@ -1825,7 +2129,9 @@ bool
 MachineWindow::QuitRequested()
 {
 	PowerOff();
-	fSettings.windowFrame = Frame();
+	// BeOS's changes are in the shared folders before the app goes
+	fFolderJobs.Wait();
+	fSettings.windowFrame = fFullScreen ? fWindowedFrame : Frame();
 	fSettings.Save();
 	be_app->PostMessage(B_QUIT_REQUESTED);
 	return true;

@@ -12,6 +12,7 @@
 #include <Application.h>
 #include <Bitmap.h>
 #include <Cursor.h>
+#include <MessageRunner.h>
 #include <Messenger.h>
 #include <Region.h>
 #include <Screen.h>
@@ -20,6 +21,9 @@
 
 #include <algorithm>
 #include <cmath>
+
+static const uint32 kMsgHintTimeout = 'hint';
+static const bigtime_t kHintDuration = 3000000;
 
 
 ScreenView::ScreenView(bebox::EmulatorThread& emulator)
@@ -31,6 +35,9 @@ ScreenView::ScreenView(bebox::EmulatorThread& emulator)
 	fFramePending(false),
 	fBitmap(nullptr),
 	fScale(1),
+	fFullScreen(false),
+	fFullScreenScale(kFullScreenFill),
+	fHintGeneration(0),
 	fCaptured(false),
 	fPowered(false),
 	fButtons(0),
@@ -70,6 +77,36 @@ ScreenView::SetScale(int32 scale)
 }
 
 
+void
+ScreenView::SetFullScreen(bool fullScreen)
+{
+	fFullScreen = fullScreen;
+	InvalidateLayout();
+	Invalidate();
+}
+
+
+void
+ScreenView::SetFullScreenScale(int32 scale)
+{
+	fFullScreenScale = scale;
+	if (fFullScreen)
+		Invalidate();
+}
+
+
+void
+ScreenView::ShowHint(const char* text)
+{
+	fHint = text;
+	BMessage timeout(kMsgHintTimeout);
+	timeout.AddInt32("generation", ++fHintGeneration);
+	BMessageRunner::StartSending(BMessenger(this), &timeout, kHintDuration,
+		1);
+	Invalidate();
+}
+
+
 BSize
 ScreenView::FrameSize() const
 {
@@ -80,7 +117,7 @@ ScreenView::FrameSize() const
 BSize
 ScreenView::MinSize()
 {
-	if (fScale == 0)
+	if (fScale == 0 || fFullScreen)
 		return BSize(160, 120);
 	return BSize(fStagingWidth * fScale - 1, fStagingHeight * fScale - 1);
 }
@@ -153,12 +190,20 @@ ScreenView::_DestinationRect() const
 	BRect bounds = Bounds();
 	float width = fStagingWidth;
 	float height = fStagingHeight;
+	float fit = std::min((bounds.Width() + 1) / width,
+		(bounds.Height() + 1) / height);
 	float scale;
-	if (fScale == 0) {
-		scale = std::min((bounds.Width() + 1) / width,
-			(bounds.Height() + 1) / height);
-	} else
-		scale = fScale;
+	if (!fFullScreen)
+		scale = fScale == 0 ? fit : fScale;
+	else if (fFullScreenScale == kFullScreenWhole)
+		scale = std::max(1.0f, floorf(fit));
+	else if (fFullScreenScale == kFullScreenActual)
+		scale = 1;
+	else
+		scale = fit;
+	// a picture larger than the screen fits it
+	if (fFullScreen && scale > fit)
+		scale = fit;
 	float w = width * scale;
 	float h = height * scale;
 	float left = bounds.left + floorf((bounds.Width() + 1 - w) / 2);
@@ -176,12 +221,44 @@ ScreenView::Draw(BRect updateRect)
 	background.Exclude(destination);
 	FillRegion(&background);
 	if (fBitmap != nullptr) {
-		uint32 options = fScale == 0 && destination.Width() + 1
-			!= fStagingWidth ? B_FILTER_BITMAP_BILINEAR : 0;
-		DrawBitmap(fBitmap, fBitmap->Bounds(), destination, options);
+		// whole multiples stay sharp, other sizes are filtered
+		bool whole = fmodf(destination.Width() + 1, fStagingWidth) == 0
+			&& fmodf(destination.Height() + 1, fStagingHeight) == 0;
+		DrawBitmap(fBitmap, fBitmap->Bounds(), destination,
+			whole ? 0 : B_FILTER_BITMAP_BILINEAR);
 	} else {
 		FillRect(destination);
 	}
+	if (fHint.Length() > 0) {
+		BRect box = _HintRect();
+		font_height metrics;
+		GetFontHeight(&metrics);
+		SetDrawingMode(B_OP_ALPHA);
+		SetBlendingMode(B_CONSTANT_ALPHA, B_ALPHA_OVERLAY);
+		SetHighColor(0, 0, 0, 190);
+		FillRoundRect(box, 6, 6);
+		SetDrawingMode(B_OP_OVER);
+		SetHighColor(255, 255, 255);
+		DrawString(fHint.String(), BPoint(box.left + 12,
+			box.top + 8 + ceilf(metrics.ascent)));
+		SetDrawingMode(B_OP_COPY);
+	}
+}
+
+
+// The hint's box, centered near the top.
+BRect
+ScreenView::_HintRect()
+{
+	SetFont(be_bold_font);
+	font_height metrics;
+	GetFontHeight(&metrics);
+	float width = ceilf(StringWidth(fHint.String())) + 24;
+	float height = ceilf(metrics.ascent + metrics.descent) + 16;
+	BRect bounds = Bounds();
+	float left = floorf((bounds.left + bounds.right - width) / 2);
+	float top = bounds.top + 24;
+	return BRect(left, top, left + width, top + height);
 }
 
 
@@ -200,6 +277,13 @@ ScreenView::MessageReceived(BMessage* message)
 			fFramePending = false;
 			_UpdateBitmap();
 			Invalidate(_DestinationRect());
+			break;
+		case kMsgHintTimeout:
+			if (message->GetInt32("generation", 0) == fHintGeneration
+				&& fHint.Length() > 0) {
+				Invalidate(_HintRect());
+				fHint = "";
+			}
 			break;
 		default:
 			BView::MessageReceived(message);
