@@ -59,7 +59,8 @@ public:
 	static	status_t			DeleteProfile(const char* name);
 
 			// A device kind set without an image would stop the machine
-			// from starting: such devices become "none".
+			// from starting: such devices become "none" (a CD-ROM drive
+			// stays, empty).
 	static	void				DropEmptyDevices(bebox::MachineConfig& machine);
 
 			BString				profile;

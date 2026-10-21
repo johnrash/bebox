@@ -22,9 +22,9 @@ from. Sources:
 
 The processor and PCI bus run at 33 MHz; the time base and decrementer tick
 at a quarter of the bus clock. The 603e has HID1 with the PLL_CFG pins.
-RAM is 8-256 MB in SIMM pairs. The motherboard revision is 5 (128 KB boot
-flash) or 6 (512 KB); the I/O card revision is reported through the A/D
-converter (below).
+RAM is 8-512 MB in SIMM pairs (see Memory). The motherboard revision is 5
+(128 KB boot flash) or 6 (512 KB); the I/O card revision is reported
+through the A/D converter (below).
 
 ## Physical memory map (both processors)
 
@@ -49,6 +49,64 @@ registers need `lwbrx`/`stwbrx`; the I/O space hands devices little endian
 values. The MPC105 answers CONFIG_ADDRESS (CF8h) only to 32-bit accesses:
 R4.5's boot ROM detects mechanism #1 with `outl 0x80000000, outb 0x0e,
 inl`, which fails otherwise **(found)**.
+
+## Memory
+
+The MPC105 decodes eight banks, each 64 bits wide (a pair of 72-pin
+SIMMs). BeBox fills banks 0, 2, 4 and 6 (single sided SIMMs) with 8-64 MB
+each, largest first, and above 256 MB banks 1, 3, 5 and 7 as well (the
+second sides of double sided SIMMs): 8-512 MB. Be's spec sheet lists 1-128
+MB SIMMs (2-256 MB banks) and its FAQ says the BeBox takes 64 and 128 MB
+SIMMs for up to 1 GB; Be only tested 32 MB SIMMs (256 MB).
+
+The MPC105 hands the address to the DRAMs multiplexed (its manual, figure
+6-6, 64-bit bus): bits 3-10 (little endian numbering) are column bits 0-7,
+the 12 bits above them (11-22) the row, and MCCR1's row bit count for the
+bank (9-12) picks the bits for column bits 8-11: the 4 above the row. The
+DRAMs decode only the bits they have (table 6-2: 8 MB banks 10 x 10, 16 MB
+11 x 10, 32 MB 11 x 11, 64 MB 12 x 11, 128 MB 12 x 12), so the other
+address bits alias. `Mpc105::_UpdateMemoryMap` maps the banks that way.
+
+The nub's memory test (`0xfff0049c` in the 1.1d7 nub; the boot ROM updates
+on the PR2, R3 and R4.5 CDs replace only the main ROM) probes the banks in
+turn, each in a 128 MB window at 128 MB times the number of banks found so
+far. It sets 12, 11, 10 and 9 row bits until the top row bit (4 MB, 2 MB,
+1 MB, 512 KB into the window) does not alias the window's start, then
+halves 2^(15 + row bits) while the top column bit aliases, three times at
+most: banks of 2-128 MB **(found)**. It tests the bank and moves it down
+after the banks found before; 0x3010 gets the total, 0x3028 the mask of
+the banks that passed. (Mirroring each SIMM over its window, as the
+emulator did before, made an 8 MB bank look like 16 MB with 12 row bits,
+which then failed its test.) Its address line test (`0xfff007c8`) forms
+the test addresses as `base | 4 << n` instead of adding them, so a 128 MB
+bank probed at an odd multiple of 128 MB writes over its own pattern at
+`base` and is switched off: only the first bank found can be 128 MB
+**(found)**. Eight 128 MB banks (1 GB of 128 MB SIMMs) leave 128 MB; eight
+64 MB banks give 512 MB. A warm reset (0xfeedbabe at 0x3014) skips the
+tests and takes the banks recorded at 0x3028. The test takes 0.064 s per
+MB on the 66 MHz model (16 s for 256 MB, 32 s for 512 MB) and half that on
+the 133 MHz one; the boot ROM's key checks (below) come after it.
+
+The kernels reach RAM through BATs of at most 256 MB:
+
+- DR8 maps all RAM with one BAT and stops with 512 MB right after
+  `BAT: map (3) 40000000, 20000000 (physical_ram)`. From 128 MB on it
+  already stops at `KERNEL: swap_file_offset: should never happen` (from
+  the CD too; 96 MB works).
+- R3 maps 512 MB with two BATs (`physical_ram_1`, `physical_ram_2`), R4.5
+  with `physical_ram_2` alone after `create_area_gen error -1 (08001000, 1,
+  1)` for the first; both run with 512 MB, show 524288 KB in About BeOS
+  and use the memory above 256 MB (a 400 MB `dd` buffer).
+- Given 1 GB (the nub's test skipped), R3 and R4.5 report 1048576 KB but
+  never use the memory above 512 MB: a second 400 MB process gets "memory
+  exhausted".
+
+With 8 MB the 1.1d7, PR2 and R3 boot ROMs work and DR8, R3 and R4.5 boot
+to the desktop, but the R4.5 boot ROM crashes: it unpacks its code to
+0x400000 and puts its heap at half the memory (0x800000 with 16 MB), so
+with 8 MB its allocator writes free list links into its own code (at
+0x403600 by `0x44dcbc`) and both processors end up looping in the program
+exception vector. R4.5 boots in 8 MB from the R3 boot ROM.
 
 ## Interrupts
 
@@ -123,7 +181,13 @@ sees `sources & mask[cpu]`. ISA lines go to both the Be controller and the
   SCRIPTS memory moves address the chip's own registers by the I/O BAR
   value (BeOS and the ROMs modify their scripts that way) **(found)**.
   SCSI targets report no unit attention after a reset: the R3 ROM gives up
-  on TEST UNIT READY with unit attention **(found)**.
+  on TEST UNIT READY with unit attention **(found)**. A CD changed while
+  BeOS runs reports unit attention 28h (medium may have changed) once;
+  BeOS R4.5 polls the drive with TEST UNIT READY every 5 s and mounts a
+  disc only after it has seen the drive empty, so a disc replacing
+  another one goes in 6 s after the old one came out **(found)**. R4.5's
+  CDPlayer ejects with START STOP UNIT (LoEj), without locking the disc
+  first.
 - **IDE**: an empty channel reads 00h (neither busy nor ready): 7Fh makes
   DR7 send IDENTIFY and wait forever, FFh makes the ROM wait 31.5 s
   **(found)**.
@@ -173,9 +237,23 @@ the table in place as `pci_table_v2` (`src/core/board/BootItems.cpp`).
 DR6's mouse driver moves the pointer two pixels per count left and down
 (negative deltas) and one right and up.
 
-Boot ROM key checks happen 5.5-6 s after a cold power on: F1 sends kernel
-debug output to serial 4 (19200 baud), other keys open the boot menu. A
-warm reset keeps RAM and shortens the memory test, so power on clears RAM.
+Boot ROM key checks: F1 sends kernel debug output to serial 4 (19200
+baud), other keys open the boot menu. They come after the memory test (2 s
+after a cold power on with 32 MB at 66 MHz) and the main ROM's keyboard
+setup: flush, controller self-test (AAh), keyboard on (AEh), command byte
+05h (scan code translation off; the ROMs decode set 2). Every ROM (1.1d7,
+R3, R4.5) starts writing to serial 4 as soon as it has seen F1, 13 ms
+(1.1d7) to 1.8 s (R3) after the setup **(found)**. Two traps
+**(found)**: a typematic repeat that arrives between AEh and the command
+byte comes translated (F1 = 3Bh, which is J in set 2), so the ROM finds J
+held and shows its boot menu, and R3 then loads `kernel_joe_alt`, which
+fails; R3 and R4.5 (after its boot menu) also load it when F1 is still
+down as they load the kernel. "Restart with debug output" and headless
+`--debug-boot` therefore press F1 when the setup turns translation off and
+release it at the first byte on serial 4 after that (or 8 s after the
+memory test for a ROM that never writes there): debug output with every
+ROM, on both models, from 16 to 512 MB. A warm reset
+keeps RAM and shortens the memory test, so power on clears RAM.
 
 The BFS releases need newer boot ROMs, shipped as
 `/beos/etc/bebox_bootmain.image` on the PR2, R3 and R4.5 CDs (R4.5's has a

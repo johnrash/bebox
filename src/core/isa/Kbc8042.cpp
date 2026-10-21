@@ -64,12 +64,10 @@ Kbc8042::Kbc8042(Scheduler& scheduler, u64 ticksPerSecond)
 		"kbc input"));
 	fRepeatTimer.reset(new Timer(scheduler, [this]() { _Repeat(); },
 		"typematic"));
-	fHoldTimer.reset(new Timer(scheduler, [this]() {
-		if (fHeldCode != 0)
-			KeyUp(fHeldCode);
-		fHeldCode = 0;
-	}, "held key"));
+	fHoldTimer.reset(new Timer(scheduler, [this]() { ReleaseHeldKey(); },
+		"held key"));
 	fHeldCode = 0;
+	fUntranslatedHoldCode = 0;
 	fTypeTimer.reset(new Timer(scheduler, [this]() {
 		if (fTypeQueue.empty())
 			return;
@@ -119,6 +117,7 @@ Kbc8042::Reset()
 	fRepeatCode = 0;
 	fRepeatTimer->Cancel();
 	fHeldCode = 0;
+	fUntranslatedHoldCode = 0;
 	fHoldTimer->Cancel();
 	fTypeQueue.clear();
 	fTypeTimer->Cancel();
@@ -290,6 +289,12 @@ Kbc8042::_ProcessInput()
 			_UpdateIrq();
 			if (!fQueue.empty() && !fDeliveryTimer->IsArmed())
 				fDeliveryTimer->ArmIn(fTicksPerSecond / 10000);
+			if (fUntranslatedHoldCode != 0
+				&& (value & kCommandTranslate) == 0) {
+				fHeldCode = fUntranslatedHoldCode;
+				fUntranslatedHoldCode = 0;
+				KeyDown(fHeldCode);
+			}
 			return;
 		case 0xd1:
 			fOutputPort = value;
@@ -601,8 +606,35 @@ Kbc8042::HoldKey(u32 code, u64 ticks)
 	if (fHeldCode != 0)
 		KeyUp(fHeldCode);
 	fHeldCode = code;
+	fUntranslatedHoldCode = 0;
 	KeyDown(code);
 	fHoldTimer->ArmIn(ticks);
+}
+
+
+void
+Kbc8042::HoldKeyUntranslated(u32 code, u64 ticks)
+{
+	if ((fCommandByte & kCommandTranslate) == 0) {
+		HoldKey(code, ticks);
+		return;
+	}
+	if (fHeldCode != 0)
+		KeyUp(fHeldCode);
+	fHeldCode = 0;
+	fUntranslatedHoldCode = code;
+	fHoldTimer->ArmIn(ticks);
+}
+
+
+void
+Kbc8042::ReleaseHeldKey()
+{
+	fHoldTimer->Cancel();
+	fUntranslatedHoldCode = 0;
+	if (fHeldCode != 0)
+		KeyUp(fHeldCode);
+	fHeldCode = 0;
 }
 
 

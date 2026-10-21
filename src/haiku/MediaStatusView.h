@@ -4,7 +4,7 @@
  *
  * Haiku's floppy, CD and hard disk icons: faded when the drive is empty,
  * the hard disk with an amber dot while the disk LED is lit. Clicking the
- * floppy inserts a disk.
+ * floppy or the CD inserts a disk or disc.
  */
 #ifndef BEBOX_MEDIA_STATUS_VIEW_H
 #define BEBOX_MEDIA_STATUS_VIEW_H

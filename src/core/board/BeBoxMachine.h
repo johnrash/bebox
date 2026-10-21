@@ -54,6 +54,8 @@ class BeBoxMachine : public Machine {
 public:
 	static const int kTicksPerBusCycle = 8;
 	static const int kSerialPorts = 4;		// serial1-4 (midi1/2 extra)
+	// F1 held at most this long after the memory test
+	static constexpr double kDebugKeyMaxSeconds = 8;
 
 	explicit					BeBoxMachine(const MachineConfig& config);
 	virtual						~BeBoxMachine();
@@ -63,6 +65,7 @@ public:
 
 	virtual	void				PowerOn();
 	virtual	void				PressInterruptSwitch();
+	virtual	void				HoldDebugOutputKey();
 	virtual	bool				SavePersistentState(std::string& error);
 	virtual	void				SetPersistentPaths(const std::string& flash,
 									const std::string& nvram);
@@ -120,6 +123,9 @@ public:
 			// Be interrupt controller bit wired to the line.
 			void				SetIsaIrq(int irq, bool level);
 
+protected:
+	virtual	ScsiDevice*			ScsiTarget(int id);
+
 private:
 			bool				_LoadRoms(std::string& error);
 			bool				_LoadNvram();
@@ -130,6 +136,7 @@ private:
 			void				_RunWorker();
 			void				_RunSliceThreaded(u64 sliceEnd);
 			void				_CheckKernelEntry();
+			void				_DebugOutputStarted();
 
 			MachineConfig		fConfig;
 			bool				fSaveAll;		// next save: even if clean
@@ -164,6 +171,8 @@ private:
 			std::unique_ptr<Timer> fSwitchTimer;
 			// Watches for the jump into the kernel (BootItems.h).
 			std::unique_ptr<Timer> fKernelEntryTimer;
+			// F1 held for the boot ROM until it writes to serial 4
+			bool				fDebugKeyHeld = false;
 
 			// Threaded mode (MachineConfig::threadPerCpu): CPU 1 runs on
 			// a worker thread, CPU 0 on the thread calling RunFor().

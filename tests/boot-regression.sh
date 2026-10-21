@@ -1,6 +1,7 @@
 #!/bin/sh
 # BeOS boot regression: boots release media headless and checks for kernel
-# debug output markers on serial4 (F1 held at power on). The installed
+# debug output markers on serial4 (--debug-boot: F1 held at power on until
+# the boot ROM writes there). The installed
 # disks are used through throwaway QCOW2 overlays, so they stay unchanged.
 # Screenshots of the final frames go to $OUT for a look.
 #
@@ -65,7 +66,7 @@ run() {
 	# F1 held at power on: kernel debug output on serial 4
 	"$BIN/bebox-headless" ${THREADS:+--threads} --rom-dir ROMs \
 		--seconds "$seconds" \
-		${F1:---key 0:F1:5500} --screenshot "$OUT/$name.png" "$@" \
+		${F1:---debug-boot} --screenshot "$OUT/$name.png" "$@" \
 		>"$log" 2>&1
 	missing=""
 	old_ifs=$IFS; IFS='|'
@@ -73,8 +74,12 @@ run() {
 		grep -q "$marker" "$log" || missing="$missing '$marker'"
 	done
 	IFS=$old_ifs
-	if [ -n "$missing" ]; then
-		echo "FAIL $name: missing$missing (see $log)"
+	# the R3 and R4.5 ROMs try it when they found F1 down too long or
+	# another key held
+	bad=""
+	grep -q "kernel_joe_alt" "$log" && bad=" loaded kernel_joe_alt"
+	if [ -n "$missing$bad" ]; then
+		echo "FAIL $name:${missing:+ missing$missing}$bad (see $log)"
 		failures=$((failures + 1))
 	else
 		echo "ok   $name ($(grep -o 'in [0-9.]* s ([0-9]*%)' "$log"))"
@@ -167,7 +172,8 @@ bfs_case pr2-cd "$PR2_CD" work/roms/pr2_bebox_bootmain.image 100
 bfs_case r3-cd "$R3_CD" work/roms/r3_bebox_bootmain.image 100 30000
 bfs_case r45-cd "$R45_CD" work/roms/r45_bebox_bootmain.image 100
 
-# installed BFS disks (no CD attached), both models
+# installed BFS disks (no CD attached), both models, with the kernel's
+# debug output
 disk_case() {
 	release=$1 disk=$2 nvram=$3 rom=$4
 	for model in 66 133; do
@@ -181,7 +187,7 @@ disk_case() {
 		fi
 		overlay "$disk" "$OUT/$name.qcow2"
 		cp "$nvram" "$OUT/$name.nvram"
-		F1=" " run $name 60 "write d4 to command" \
+		run $name 60 "bytes of RAM (32 MBytes)|write d4 to command" \
 			--model $model --main-rom "$rom" --nvram "$OUT/$name.nvram" \
 			--scsi0-disk "$OUT/$name.qcow2" --log kbd=debug
 		$BIN/bebox-img check "$OUT/$name.qcow2" >/dev/null \
@@ -191,6 +197,66 @@ disk_case() {
 }
 disk_case r3 "$R3_DISK" "$R3_NVRAM" work/roms/r3_bebox_bootmain.image
 disk_case r45 "$R45_DISK" "$R45_NVRAM" work/roms/r45_bebox_bootmain.image
+
+# 512 MB in eight 64 MB banks, the most the boot ROM's memory test takes
+# (the test runs 32.7 s)
+if [ -z "$CASES" ] || want r45-disk-512; then
+	if [ -f "$R45_DISK" ] && [ -f "$R45_NVRAM" ]; then
+		overlay "$R45_DISK" "$OUT/r45-512.qcow2"
+		cp "$R45_NVRAM" "$OUT/r45-512.nvram"
+		run r45-disk-512 90 \
+			"20000000 bytes of RAM (512 MBytes)|write d4 to command" \
+			--ram 512 --main-rom work/roms/r45_bebox_bootmain.image \
+			--nvram "$OUT/r45-512.nvram" \
+			--scsi0-disk "$OUT/r45-512.qcow2" --log kbd=debug
+	else
+		echo "skip r45-disk-512 (no $R45_DISK or $R45_NVRAM)"
+	fi
+fi
+# the same with R3 on the 133 MHz model (the test runs 16.4 s)
+if [ -z "$CASES" ] || want r3-disk-512; then
+	if [ -f "$R3_DISK" ] && [ -f "$R3_NVRAM" ]; then
+		overlay "$R3_DISK" "$OUT/r3-512.qcow2"
+		cp "$R3_NVRAM" "$OUT/r3-512.nvram"
+		run r3-disk-512 60 \
+			"20000000 bytes of RAM (512 MBytes)|write d4 to command" \
+			--model 133 --ram 512 \
+			--main-rom work/roms/r3_bebox_bootmain.image \
+			--nvram "$OUT/r3-512.nvram" \
+			--scsi0-disk "$OUT/r3-512.qcow2" --log kbd=debug
+	else
+		echo "skip r3-disk-512 (no $R3_DISK or $R3_NVRAM)"
+	fi
+fi
+# 24 MB: a 16 MB and an 8 MB bank (10 row and 10 column bits)
+if [ -z "$CASES" ] || want r45-disk-24; then
+	if [ -f "$R45_DISK" ] && [ -f "$R45_NVRAM" ]; then
+		overlay "$R45_DISK" "$OUT/r45-24.qcow2"
+		cp "$R45_NVRAM" "$OUT/r45-24.nvram"
+		run r45-disk-24 60 \
+			"bytes of RAM (24 MBytes)|write d4 to command" \
+			--ram 24 --main-rom work/roms/r45_bebox_bootmain.image \
+			--nvram "$OUT/r45-24.nvram" \
+			--scsi0-disk "$OUT/r45-24.qcow2" --log kbd=debug
+	else
+		echo "skip r45-disk-24 (no $R45_DISK or $R45_NVRAM)"
+	fi
+fi
+# 8 MB: R4.5 runs, but its own boot ROM puts its heap on its code there,
+# so it boots from the R3 boot ROM
+if [ -z "$CASES" ] || want r45-disk-8; then
+	if [ -f "$R45_DISK" ] && [ -f "$R45_NVRAM" ]; then
+		overlay "$R45_DISK" "$OUT/r45-8.qcow2"
+		cp "$R45_NVRAM" "$OUT/r45-8.nvram"
+		run r45-disk-8 60 \
+			"bytes of RAM (8 MBytes)|write d4 to command" \
+			--ram 8 --main-rom work/roms/r3_bebox_bootmain.image \
+			--nvram "$OUT/r45-8.nvram" \
+			--scsi0-disk "$OUT/r45-8.qcow2" --log kbd=debug
+	else
+		echo "skip r45-disk-8 (no $R45_DISK or $R45_NVRAM)"
+	fi
+fi
 
 # the Cirrus Logic card (the others use the default #9 GXE64)
 if [ -z "$CASES" ] || want dr8-disk-cirrus; then

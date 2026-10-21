@@ -42,6 +42,8 @@ public:
 									{ fIrq = callback; }
 			void				AttachDevice(int id,
 									std::unique_ptr<ScsiDevice> device);
+			ScsiDevice*			Device(int id) const
+									{ return fDevices[id].get(); }
 
 			// Registers 0-15 (bytes) and the pseudo-DMA port (16 bits).
 	virtual	u32					IoRead(u32 port, int size);

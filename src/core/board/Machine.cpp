@@ -6,6 +6,7 @@
 
 #include "BeBoxMachine.h"
 #include "../hobbit/HobbitMachine.h"
+#include "../pci/ScsiDevice.h"
 
 namespace bebox {
 
@@ -15,6 +16,15 @@ Machine::Create(const MachineConfig& config)
 	if (config.model == MachineConfig::kHobbit)
 		return std::unique_ptr<Machine>(new HobbitMachine(config));
 	return std::unique_ptr<Machine>(new BeBoxMachine(config));
+}
+
+
+ScsiCd*
+Machine::CdRom(int id)
+{
+	if (id < 0 || id >= 7)
+		return nullptr;
+	return dynamic_cast<ScsiCd*>(ScsiTarget(id));
 }
 
 }	// namespace bebox

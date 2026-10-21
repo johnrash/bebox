@@ -20,7 +20,7 @@ struct MachineConfig {
 	};
 
 	Model			model = kBeBox66;
-	u32				ramMB = 32;			// 8-256, in SIMM pairs
+	u32				ramMB = 32;			// 8-512, banks of 8-64 MB (SIMM pairs)
 	int				cpuCount = 2;		// 1 for debugging
 	u32				pvr = 0;			// 0: the model's default
 	u32				busHz = 33000000;	// processor and PCI bus

@@ -100,6 +100,9 @@ public:
 			void				SetTrace(FILE* file, u64 count, u64 start,
 									int cpuMask, const std::vector<u32>& pcs);
 
+protected:
+	virtual	ScsiDevice*			ScsiTarget(int id);
+
 private:
 	// a loadable segment of the kernel's ELF file
 	struct Segment {

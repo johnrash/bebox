@@ -113,8 +113,12 @@ MediaStatusView::Draw(BRect updateRect)
 void
 MediaStatusView::MouseDown(BPoint where)
 {
-	if (_IconFrame(kFloppy).Contains(where) && Window() != nullptr)
+	if (Window() == nullptr)
+		return;
+	if (_IconFrame(kFloppy).Contains(where))
 		Window()->PostMessage(kMsgInsertFloppy);
+	else if (_IconFrame(kCd).Contains(where))
+		Window()->PostMessage(kMsgInsertCd);
 }
 
 

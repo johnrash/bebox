@@ -111,11 +111,12 @@ ScsiDevice::Execute(ScsiCommand& command)
 		}
 	}
 
-	// A unit attention is reported once after reset, except to INQUIRY
-	// and REQUEST SENSE.
+	// A unit attention is reported once after a medium change, except to
+	// INQUIRY and REQUEST SENSE.
 	if (fUnitAttention && opcode != 0x12 && opcode != 0x03) {
 		fUnitAttention = false;
-		CheckCondition(command, kSenseUnitAttention, 0x29);
+		// not ready to ready change, medium may have changed
+		CheckCondition(command, kSenseUnitAttention, 0x28);
 		return;
 	}
 
@@ -358,12 +359,16 @@ ScsiDisk::DataOutSpecific(ScsiCommand& command, const std::vector<u8>& data)
 // #pragma mark - CD-ROM
 
 
-ScsiCd::ScsiCd(const std::string& vendor, const std::string& product)
+ScsiCd::ScsiCd(Scheduler& scheduler, u64 ticksPerSecond,
+	const std::string& vendor, const std::string& product)
 	:
 	fVendor(vendor),
 	fProduct(product),
 	fBlockSize(2048),
-	fLocked(false)
+	fLocked(false),
+	fTicksPerSecond(ticksPerSecond),
+	fChangeTimer(scheduler, [this]() { Insert(std::move(fNextImage)); },
+		"cd change")
 {
 }
 
@@ -371,9 +376,32 @@ ScsiCd::ScsiCd(const std::string& vendor, const std::string& product)
 void
 ScsiCd::Reset()
 {
+	// a power cycle in the middle of a change: the new disc is in
+	if (fChangeTimer.IsArmed()) {
+		fChangeTimer.Cancel();
+		fImage = std::move(fNextImage);
+	}
 	ScsiDevice::Reset();
 	fBlockSize = 2048;
 	fLocked = false;
+}
+
+
+void
+ScsiCd::Change(std::unique_ptr<CdImage> image)
+{
+	fChangeTimer.Cancel();
+	fNextImage.reset();
+	if (!fImage) {
+		if (image)
+			Insert(std::move(image));
+		return;
+	}
+	Eject();
+	if (image) {
+		fNextImage = std::move(image);
+		fChangeTimer.ArmIn(kChangeSeconds * fTicksPerSecond);
+	}
 }
 
 
@@ -391,6 +419,13 @@ ScsiCd::Eject()
 {
 	fImage.reset();
 	fUnitAttention = true;
+}
+
+
+std::string
+ScsiCd::MediumPath() const
+{
+	return fImage ? fImage->Path() : std::string();
 }
 
 
@@ -544,7 +579,10 @@ ScsiCd::ExecuteSpecific(ScsiCommand& command)
 					CheckCondition(command, kSenseIllegalRequest, 0x53, 0x02);
 					return true;
 				}
+				std::string path = MediumPath();
 				fImage.reset();
+				if (fEjectCallback && !path.empty())
+					fEjectCallback(path);
 			}
 			return true;
 		case 0x1e:		// PREVENT ALLOW MEDIUM REMOVAL

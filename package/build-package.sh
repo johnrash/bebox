@@ -1,7 +1,7 @@
 #!/bin/bash
 # Builds the app and the command line tools on Haiku and creates the .hpkg.
 # Needs haiku_devel, zlib_devel and libslirp_devel. Bump the revision in PackageInfo
-# (0.1.0-2, -3, ...) for every package meant to replace an installed one.
+# (1.1-2, -3, ...) for every package meant to replace an installed one.
 #
 #   package/build-package.sh
 set -e

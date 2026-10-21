@@ -16,6 +16,8 @@
 #include "core/hobbit/HobbitMachine.h"
 #include "core/host/KeyCodes.h"
 #include "core/host/NetworkBackend.h"
+#include "core/pci/ScsiDevice.h"
+#include "core/storage/CdImage.h"
 #include "core/storage/DiskImage.h"
 #include "core/storage/SharedFolder.h"
 #include "core/host/VideoSink.h"
@@ -328,6 +330,8 @@ Usage()
 		"  --ne2000 PORT:IRQ   card resources (hex port, default 300:5)\n"
 		"  --interrupt MS      press the front panel Interrupt switch at MS\n"
 		"  --power-cycle MS    power on again (hard reset) at MS\n"
+		"  --debug-boot        hold F1 at power on (kernel debug output on\n"
+		"                      serial 4) until the boot ROM writes there\n"
 		"  --click MS:X,Y[,B]  from MS on, move the mouse until the hardware\n"
 		"                      cursor is at X,Y, then click button B (1-3, 0:\n"
 		"                      only move); mouse actions run in order\n"
@@ -358,6 +362,9 @@ Usage()
 		"                      (\\n is Enter, \\t Tab)\n"
 		"  --floppy-insert MS:FILE  change the floppy at MS (empty FILE:\n"
 		"                      eject)\n"
+		"  --cd-insert MS:N:FILE  change the disc in the CD-ROM drive on\n"
+		"                      SCSI ID N at MS (empty FILE: eject; a disc\n"
+		"                      in the drive comes out 6 s before)\n"
 		"  --key MS:NAME[:HOLD] press a key (Enter, Up, Escape, A, ...) for\n"
 		"                      HOLD ms (default 100)\n"
 		"  --shots PREFIX      save a PNG every second (PREFIX-N.png)\n");
@@ -409,6 +416,12 @@ main(int argc, char** argv)
 		std::string image;
 	};
 	std::vector<FloppyChange> floppyChanges;
+	struct CdChange {
+		double ms;
+		int id;
+		std::string image;
+	};
+	std::vector<CdChange> cdChanges;
 	struct KeyEvent {
 		u64 time;		// microseconds
 		u32 code;
@@ -425,6 +438,7 @@ main(int argc, char** argv)
 	std::vector<SerialInput> serialInputs;
 	std::vector<double> interrupts;
 	std::vector<double> powerCycles;
+	bool debugBoot = false;
 	struct MouseAction {
 		u64 time;		// microseconds
 		int x;
@@ -559,6 +573,8 @@ main(int argc, char** argv)
 				mouseActions.push_back(action);
 		} else if (arg == "--power-cycle")
 			powerCycles.push_back(atof(next()));
+		else if (arg == "--debug-boot")
+			debugBoot = true;
 		else if (arg == "--interrupt")
 			interrupts.push_back(atof(next()));
 		else if (arg.compare(0, 8, "--serial") == 0 && arg.size() == 9)
@@ -624,6 +640,18 @@ main(int argc, char** argv)
 				return 2;
 			}
 			floppyChanges.push_back({ atof(value), colon + 1 });
+		} else if (arg == "--cd-insert") {
+			// MS:N:FILE
+			const char* value = next();
+			const char* colon = strchr(value, ':');
+			const char* second = colon != nullptr ? strchr(colon + 1, ':')
+				: nullptr;
+			int id = colon != nullptr ? atoi(colon + 1) : -1;
+			if (second == nullptr || id < 0 || id > 6) {
+				fprintf(stderr, "bad --cd-insert %s\n", value);
+				return 2;
+			}
+			cdChanges.push_back({ atof(value), id, second + 1 });
 		} else if (arg == "--key") {
 			// MS:NAME[:HOLD] presses a key at MS emulated ms and releases
 			// it HOLD ms later (default 100)
@@ -714,8 +742,19 @@ main(int argc, char** argv)
 		fprintf(stderr, "bebox-headless: %s\n", error.c_str());
 		return 1;
 	}
+	if (debugBoot)
+		machine.HoldDebugOutputKey();
 	if (haveRtcDate)
 		machine.Rtc().SetTimeOffset(rtcDate - (s64)time(nullptr));
+	for (int id = 0; id < 7; id++) {
+		if (ScsiCd* cd = machine.CdRom(id)) {
+			cd->SetEjectCallback([&machine, id](const std::string& path) {
+				Status("[%9.3f ms] CD-ROM %d: the guest ejected %s\n",
+					machine.Now() * 1000.0 / machine.TicksPerSecond(), id,
+					path.c_str());
+			});
+		}
+	}
 
 	std::unique_ptr<NetworkBackend> network;
 	if (config.ethernet) {
@@ -906,6 +945,8 @@ main(int argc, char** argv)
 		for (double& at : powerCycles) {
 			if (at >= 0 && nowUs >= at * 1000) {
 				machine.PowerOn();
+				if (debugBoot)
+					machine.HoldDebugOutputKey();
 				at = -1;
 			}
 		}
@@ -940,6 +981,28 @@ main(int argc, char** argv)
 				}
 			}
 			Status("[%9.3f ms] floppy %s\n", nowUs / 1000.0,
+				change.image.empty() ? "ejected" : change.image.c_str());
+		}
+		for (CdChange& change : cdChanges) {
+			if (change.ms < 0 || nowUs < change.ms * 1000)
+				continue;
+			change.ms = -1;
+			ScsiCd* cd = machine.CdRom(change.id);
+			if (cd == nullptr) {
+				fprintf(stderr, "bebox-headless: no CD-ROM drive on SCSI "
+					"ID %d\n", change.id);
+				continue;
+			}
+			std::unique_ptr<CdImage> image;
+			if (!change.image.empty()) {
+				image = CdImage::Open(change.image, error);
+				if (!image) {
+					fprintf(stderr, "bebox-headless: %s\n", error.c_str());
+					continue;
+				}
+			}
+			cd->Change(std::move(image));
+			Status("[%9.3f ms] CD-ROM %d %s\n", nowUs / 1000.0, change.id,
 				change.image.empty() ? "ejected" : change.image.c_str());
 		}
 		for (KeyEvent& key : keys) {

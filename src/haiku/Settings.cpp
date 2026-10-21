@@ -458,7 +458,9 @@ Settings::DropEmptyDevices(MachineConfig& machine)
 		MachineConfig::ScsiTarget& target = machine.scsi[id];
 		BString image(target.image.c_str());
 		if (image.Trim().IsEmpty()) {
-			target.kind = MachineConfig::ScsiTarget::kNone;
+			// a CD-ROM drive may be empty
+			if (target.kind != MachineConfig::ScsiTarget::kCdRom)
+				target.kind = MachineConfig::ScsiTarget::kNone;
 			target.image.clear();
 		}
 	}

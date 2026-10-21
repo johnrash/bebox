@@ -24,6 +24,7 @@ namespace bebox {
 class Uart16550 : public ByteIoDevice {
 public:
 	typedef std::function<void(bool)> IrqCallback;
+	typedef std::function<void(u8)> TransmitCallback;
 
 								Uart16550(const char* name, u32 base,
 									u32 clock, Scheduler& scheduler,
@@ -34,6 +35,10 @@ public:
 									{ fIrq = callback; }
 			void				SetBackend(SerialBackend* backend);
 			SerialBackend*		Backend() const { return fBackend; }
+			// Called with every byte sent on the line (not in loopback
+			// mode), with or without a backend.
+			void				SetTransmitCallback(TransmitCallback callback)
+									{ fTransmitted = callback; }
 			// Modem status inputs tied to fixed levels on the board (MSR
 			// bits 4-7) when no backend drives them.
 			void				SetHardwiredLines(u8 lines)
@@ -64,6 +69,7 @@ private:
 			bool				fOut2GatesIrq;
 			SerialBackend*		fBackend;
 			IrqCallback			fIrq;
+			TransmitCallback	fTransmitted;
 			u8					fHardwiredLines;
 
 			u16					fDivisor;

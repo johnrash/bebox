@@ -149,8 +149,11 @@ Uart16550::_TransmitDone()
 	fTransmitting = false;
 	if ((fMcr & kMcrLoop) != 0) {
 		_ReceiveByte(fShift);
-	} else if (fBackend != nullptr) {
-		fBackend->Transmit(fShift);
+	} else {
+		if (fBackend != nullptr)
+			fBackend->Transmit(fShift);
+		if (fTransmitted)
+			fTransmitted(fShift);
 	}
 	if (fTxFifo.empty())
 		fLsr |= kLsrTemt;

@@ -92,11 +92,12 @@ public:
 					|| strcmp(arg + 7, "-share") == 0)) {
 				bebox::MachineConfig::ScsiTarget& target
 					= fSettings.machine.scsi[arg[6] - '0'];
-				// an empty image removes the device
-				target.kind = value[0] == '\0'
-					? bebox::MachineConfig::ScsiTarget::kNone
-					: strcmp(arg + 7, "-cd") == 0
-						? bebox::MachineConfig::ScsiTarget::kCdRom
+				// an empty image removes the device (a CD-ROM drive stays,
+				// empty)
+				bool cd = strcmp(arg + 7, "-cd") == 0;
+				target.kind = cd ? bebox::MachineConfig::ScsiTarget::kCdRom
+					: value[0] == '\0'
+						? bebox::MachineConfig::ScsiTarget::kNone
 					: strcmp(arg + 7, "-share") == 0
 						? bebox::MachineConfig::ScsiTarget::kSharedFolder
 						: bebox::MachineConfig::ScsiTarget::kDisk;
@@ -126,13 +127,14 @@ public:
 	virtual void AboutRequested()
 	{
 		BAboutWindow* about = new BAboutWindow(kAppName, kAppSignature);
-		about->AddDescription("An emulator of the Be BeBox: two PowerPC 603 "
-			"(66 MHz) or 603e (133 MHz) processors, the BeBox motherboard "
-			"with its blinkenlights, and the original Be Boot ROM.");
-		const char* authors[] = { "The BeBox emulator authors", nullptr };
+		about->AddDescription("\"BeBox\" is a PowerPC and Hobbit BeBox "
+			"emulator written in C++ for the Haiku Operating System.");
+		const char* authors[] = { "Claude Opus 5.5", "John Rash", nullptr };
 		about->AddAuthors(authors);
 		about->AddCopyright(2026, "The BeBox emulator authors");
-		about->AddText("Distributed under the terms of the MIT License.");
+		// one block: no blank line between the two
+		about->AddText("Distributed under the terms of the MIT License.\n"
+			"BeBox icon by zuMi, used under the MIT License.");
 		about->Show();
 	}
 

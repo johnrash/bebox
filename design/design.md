@@ -246,4 +246,6 @@ volume. The front ends supply the host's attributes (`HostAttributes`:
 `--watch-write ADDR` (who writes a word), `--log CATEGORY=LEVEL`,
 `--key`, `--type`, `--click`/`--press`/`--release`/`--dclick` (closed loop
 on the hardware cursor position), `--shots` (a PNG every second),
-`--serialN` destinations and `--interrupt`/`--power-cycle`.
+`--serialN` destinations, `--interrupt`/`--power-cycle` and `--debug-boot`
+(F1 for the kernel's debug output on serial 4, as the app's Machine menu
+holds it).

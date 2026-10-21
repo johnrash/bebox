@@ -183,6 +183,11 @@ BeBoxMachine::Init(std::string& error)
 				: fConfig.boardRevision == 5 ? 0x70 : 0x60);
 		}
 		fIo->Map(setup.base, 8, fUarts[i].get());
+		if (setup.base == 0x388) {
+			fUarts[i]->SetTransmitCallback([this](u8) {
+				_DebugOutputStarted();
+			});
+		}
 		if (setup.isaIrq >= 0) {
 			int irq = setup.isaIrq;
 			fUarts[i]->SetIrqCallback([this, irq](bool level) {
@@ -287,8 +292,8 @@ BeBoxMachine::Init(std::string& error)
 			fScsi->AttachDevice(id, std::move(disk));
 		} else if (target.kind == MachineConfig::ScsiTarget::kCdRom) {
 			// A Toshiba drive: the boot ROM knows how to boot from it.
-			std::unique_ptr<ScsiCd> cd(new ScsiCd("TOSHIBA",
-				"CD-ROM XM-3401TA"));
+			std::unique_ptr<ScsiCd> cd(new ScsiCd(fScheduler,
+				fTicksPerSecond, "TOSHIBA", "CD-ROM XM-3401TA"));
 			if (!target.image.empty()) {
 				std::unique_ptr<CdImage> image = CdImage::Open(target.image,
 					error);
@@ -457,13 +462,20 @@ BeBoxMachine::_RequestPowerOn()
 void
 BeBoxMachine::_SetupMemory()
 {
-	// Split the RAM into SIMM pairs of 8, 16, 32 or 64 MB (one 64-bit
-	// bank each), largest first; banks 0, 2, 4 and 6 (single sided).
-	u32 remaining = std::min<u32>(256, std::max<u32>(8, fConfig.ramMB));
+	// Split the RAM into banks (64 bits wide: a pair of 72-pin SIMMs) of
+	// 8, 16, 32 or 64 MB, largest first: banks 0, 2, 4 and 6 (single
+	// sided SIMMs), above 256 MB also banks 1, 3, 5 and 7 (the second
+	// sides of double sided SIMMs: a pair of 64 MB SIMMs fills two 64 MB
+	// banks). The boot ROM's memory test sizes banks of 2-128 MB through
+	// the MPC105's row and column bits (Mpc105::_UpdateMemoryMap), but
+	// takes a 128 MB bank only as the first bank it finds, so 512 MB is
+	// the most it can use.
+	static const int kBankOrder[8] = { 0, 2, 4, 6, 1, 3, 5, 7 };
+	u32 remaining = std::min<u32>(512, std::max<u32>(8, fConfig.ramMB));
 	remaining &= ~7u;
 	u32 total = 0;
-	int bank = 0;
-	while (remaining >= 8 && bank < 8) {
+	for (int i = 0; i < 8 && remaining >= 8; i++) {
+		int bank = kBankOrder[i];
 		u32 size = 64;
 		while (size > remaining)
 			size /= 2;
@@ -474,7 +486,6 @@ BeBoxMachine::_SetupMemory()
 		BB_LOG(kLogMachine, kLogInfo, "bank %d: %u MB", bank, size);
 		remaining -= size;
 		total += size;
-		bank += 2;
 	}
 	fConfig.ramMB = total;
 }
@@ -587,6 +598,7 @@ BeBoxMachine::PowerOn()
 	fRtc->Reset();
 	fFlash->Reset();
 	fKeyboard->Reset();
+	fDebugKeyHeld = false;
 	if (fCirrus)
 		fCirrus->Reset();
 	if (fS3)
@@ -627,6 +639,42 @@ BeBoxMachine::_CheckKernelEntry()
 	std::string log;
 	if (BootItems::AdaptForKernel(*fBus, log))
 		BB_LOG(kLogMachine, kLogInfo, "%s", log.c_str());
+}
+
+
+// The boot ROM looks for F1 after the memory test (0.064 s per MB at
+// 66 MHz, half that at 133 MHz) and its keyboard setup, and starts writing
+// to serial 4 as soon as it has seen it: 13 ms (1.1d7) to 1.8 s (R3) after
+// the setup. The R3 and R4.5 ROMs load kernel_joe_alt instead of the
+// kernel when F1 is still down as they load it, and a typematic repeat that
+// arrives translated during the setup is J to the ROM (R3: boot menu, and
+// kernel_joe_alt again). So F1 goes down when the setup turns scan code
+// translation off and up at the first byte on serial 4 after that, or
+// 'kDebugKeyMaxSeconds' after the memory test for a ROM that never writes
+// there.
+void
+BeBoxMachine::HoldDebugOutputKey()
+{
+	static const u32 kKeyF1 = 0x05;
+	double memoryTest = fConfig.ramMB * (fConfig.model
+		== MachineConfig::kBeBox133 ? 0.032 : 0.064);
+	fKeyboard->HoldKeyUntranslated(kKeyF1,
+		(u64)((kDebugKeyMaxSeconds + memoryTest) * fTicksPerSecond));
+	fDebugKeyHeld = true;
+}
+
+
+void
+BeBoxMachine::_DebugOutputStarted()
+{
+	// only output while F1 is down answers it (the nub prints garbage
+	// there when it finds no memory it can use)
+	if (!fDebugKeyHeld || !fKeyboard->HoldingKey())
+		return;
+	fDebugKeyHeld = false;
+	BB_LOG(kLogMachine, kLogInfo, "boot ROM writes to serial4 at %.3f s: "
+		"F1 up", fScheduler.Now() / (double)fTicksPerSecond);
+	fKeyboard->ReleaseHeldKey();
 }
 
 
@@ -765,6 +813,13 @@ bool
 BeBoxMachine::DebugTranslate(int cpu, u32 va, u32& pa)
 {
 	return fCpus[cpu]->DebugTranslate(va, false, pa);
+}
+
+
+ScsiDevice*
+BeBoxMachine::ScsiTarget(int id)
+{
+	return fScsi ? fScsi->Device(id) : nullptr;
 }
 
 }	// namespace bebox

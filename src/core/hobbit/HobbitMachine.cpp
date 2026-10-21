@@ -206,8 +206,8 @@ HobbitMachine::Init(std::string& error)
 			fScsi->AttachDevice(id, std::unique_ptr<ScsiDevice>(
 				new ScsiDisk(std::move(image), "QUANTUM", "LP240S")));
 		} else if (target.kind == MachineConfig::ScsiTarget::kCdRom) {
-			std::unique_ptr<ScsiCd> cd(new ScsiCd("TOSHIBA",
-				"CD-ROM XM-3401TA"));
+			std::unique_ptr<ScsiCd> cd(new ScsiCd(fScheduler,
+				fTicksPerSecond, "TOSHIBA", "CD-ROM XM-3401TA"));
 			if (!target.image.empty()) {
 				std::unique_ptr<CdImage> image = CdImage::Open(target.image,
 					error);
@@ -664,6 +664,13 @@ bool
 HobbitMachine::DebugTranslate(int cpu, u32 va, u32& pa)
 {
 	return fCpus[cpu]->DebugTranslate(va, pa);
+}
+
+
+ScsiDevice*
+HobbitMachine::ScsiTarget(int id)
+{
+	return fScsi ? fScsi->Device(id) : nullptr;
 }
 
 

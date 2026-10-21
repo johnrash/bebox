@@ -31,6 +31,8 @@ public:
 	struct Bank {
 		u8* host = nullptr;		// null: no SIMM in this bank
 		u32 size = 0;
+		int rowBits = 0;		// the DRAM devices' address bits
+		int columnBits = 0;
 	};
 
 	typedef std::function<u8()> InterruptAcknowledge;
@@ -39,6 +41,9 @@ public:
 									PciBus& pci);
 								~Mpc105();
 
+			// 'size' is a power of two from 2 to 128 MB: the bank is
+			// built from DRAMs of the usual geometry for it (8 MB: 10 row
+			// and 10 column bits).
 			void				SetBank(int index, u8* host, u32 size);
 			void				SetInterruptAcknowledge(
 									InterruptAcknowledge callback)
@@ -83,6 +88,7 @@ private:
 			Bank				fBanks[8];
 			u32					fConfigAddress;
 			u8					fMappedConfig[0x21];	// banks + MBEN (0x80-0xa0)
+			u8					fMappedRowBits[2];	// MCCR1 bits 15-0
 			InterruptAcknowledge fIntAck;
 			IoWindow*			fIoWindow;
 			ConfigWindow*		fConfigWindow;

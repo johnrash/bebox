@@ -41,6 +41,17 @@ public:
 			// Presses a key and releases it after 'ticks' of emulated
 			// time (boot ROM key checks), repeating meanwhile.
 			void				HoldKey(u32 code, u64 ticks);
+			// The same, but the key goes down only once scan code
+			// translation is off (at once if it is already): the boot
+			// ROMs decode set 2 and turn translation off themselves, and
+			// a translated code they read before is another key to them
+			// (F1 is 3b in set 1, J in set 2). 'ticks' count from now.
+			void				HoldKeyUntranslated(u32 code, u64 ticks);
+			// Releases the key held by HoldKey() or HoldKeyUntranslated()
+			// now, if it still is.
+			void				ReleaseHeldKey();
+			// That key is down.
+			bool				HoldingKey() const { return fHeldCode != 0; }
 			// Key events (code, down) one after another, 'interval' ticks
 			// apart (typing text for scripts).
 			void				TypeKeys(
@@ -105,6 +116,8 @@ private:
 			std::unique_ptr<Timer> fRepeatTimer;
 			std::unique_ptr<Timer> fHoldTimer;
 			u32					fHeldCode;
+			// HoldKeyUntranslated(): pressed when translation goes off
+			u32					fUntranslatedHoldCode;
 			std::unique_ptr<Timer> fTypeTimer;
 			std::deque<std::pair<u32, bool> > fTypeQueue;
 			u64					fTypeInterval;

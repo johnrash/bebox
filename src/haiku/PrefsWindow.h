@@ -4,7 +4,7 @@
  *
  * A sidebar of sections (with the icons of Haiku's own preferences) and
  * a page per section. OK applies the changes; changes to the hardware
- * restart the machine.
+ * restart the machine, a new floppy or CD goes into the running one.
  */
 #ifndef BEBOX_PREFS_WINDOW_H
 #define BEBOX_PREFS_WINDOW_H
@@ -51,6 +51,7 @@ private:
 									const int32* values, int count,
 									int32 current, BPopUpMenu** menu,
 									uint32 what = 'nop ');
+			void				_UpdateMemoryMenu(bool hobbit, int32 current);
 			int32				_Selected(BPopUpMenu* menu) const;
 			void				_Browse(int32 which, bool directory);
 			void				_BootRomChosen(const char* path);

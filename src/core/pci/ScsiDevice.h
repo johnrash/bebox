@@ -10,6 +10,7 @@
 #define BEBOX_SCSI_DEVICE_H
 
 #include "../Types.h"
+#include "../board/Scheduler.h"
 
 #include <functional>
 #include <memory>
@@ -102,12 +103,31 @@ private:
 
 class ScsiCd : public ScsiDevice {
 public:
-								ScsiCd(const std::string& vendor,
+	typedef std::function<void(const std::string&)> EjectCallback;
+
+	// How long a disc changed for another stays out of the drive.
+	static const u32			kChangeSeconds = 6;
+
+								ScsiCd(Scheduler& scheduler,
+									u64 ticksPerSecond,
+									const std::string& vendor,
 									const std::string& product);
 
+			// Puts a disc in (null: ejects) while the machine runs, also
+			// when the guest has locked the disc in. A disc already in
+			// comes out first and the new one goes in kChangeSeconds later:
+			// BeOS (polling every 5 s) takes a new disc for one only after
+			// it has seen the drive empty.
+			void				Change(std::unique_ptr<CdImage> image);
+			// At once (the guest sees a medium change).
 			bool				Insert(std::unique_ptr<CdImage> image);
 			void				Eject();
 			bool				HasMedium() const { return fImage != nullptr; }
+			// The image's path ("" when empty).
+			std::string			MediumPath() const;
+			// The guest ejected the disc (START STOP UNIT); gets its path.
+			void				SetEjectCallback(EjectCallback callback)
+									{ fEjectCallback = callback; }
 
 	virtual	void				Reset();
 	virtual	const char*			Kind() const { return "CD-ROM"; }
@@ -131,6 +151,10 @@ private:
 			std::string			fProduct;
 			u32					fBlockSize;		// 2048 or 512
 			bool				fLocked;
+			EjectCallback		fEjectCallback;
+			u64					fTicksPerSecond;
+			Timer				fChangeTimer;
+			std::unique_ptr<CdImage> fNextImage;	// after a Change()
 };
 
 }	// namespace bebox

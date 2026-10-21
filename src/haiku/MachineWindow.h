@@ -11,6 +11,8 @@
  *   get/set Running (bool), get Speed, Mips, EmulatedTime (double),
  *   get LedLevels (two int32: left, right, 0-15), get DiskLed (bool),
  *   get SerialLog [1-4] (console output), get/set Floppy (image, "" ejects)
+ *   get/set CdRom [SCSI ID] (the disc image of that CD-ROM drive or of the
+ *   first one, "" ejects)
  *   get/set Profile (the machine profile; set switches, restarting a
  *   running machine), get Profiles (all names)
  *   pwon, pwof, rset: power on, off, reset
@@ -35,6 +37,10 @@
 #include <vector>
 
 #include <Window.h>
+
+namespace bebox {
+class CdImage;
+}
 
 class BFilePanel;
 class BJoystick;
@@ -97,6 +103,19 @@ private:
 			bool				_HandleScripting(BMessage* message);
 			void				_InsertFloppy(const char* path);
 			void				_EjectFloppy();
+			// The SCSI IDs of the CD-ROM drives.
+			std::vector<int>	_CdDrives() const;
+			void				_UpdateCdItems();
+			void				_ShowCdPanel(int id);
+			// Puts the disc in the drive (the old one comes out first); an
+			// image that does not open is reported in 'errorText', or in
+			// an alert.
+			bool				_InsertCd(int id, const char* path,
+									BString* errorText = nullptr);
+			void				_EjectCd(int id);
+			void				_ChangeCd(int id,
+									std::unique_ptr<bebox::CdImage> image);
+			void				_MediaChanged();
 			void				_PrepareSharedFolders(
 									bebox::MachineConfig& config);
 			void				_SyncSharedFolders(bool interactive);
@@ -132,8 +151,15 @@ private:
 			BMessenger			fPrefsWindow;
 			BMenuItem*			fScaleItems[3];
 			BMenuItem*			fShowLedsItem;
+			BMenu*				fMediaMenu;
 			BMenuItem*			fEjectFloppyItem;
 			BFilePanel*			fFloppyPanel;
+			// the CD-ROM drives' items (by _CdDrives()), after the floppy's
+			int32				fCdItemsIndex;
+			std::vector<int>	fCdItemDrives;
+			std::vector<BMenuItem*> fInsertCdItems;
+			std::vector<BMenuItem*> fEjectCdItems;
+			BFilePanel*			fCdPanel;
 			bool				fKeysDown[128];
 			uint32				fModifiers;
 			bool				fPowered;

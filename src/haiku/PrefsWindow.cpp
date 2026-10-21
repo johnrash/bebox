@@ -55,7 +55,8 @@ enum {
 	kMsgSerialKind = 'srkd',
 	kMsgResetFlashRequest = 'rfrq',
 	kMsgClearNvramRequest = 'cnrq',
-	kMsgResetConfirmed = 'rscf'
+	kMsgResetConfirmed = 'rscf',
+	kMsgModel = 'modl'
 };
 
 enum {
@@ -239,7 +240,7 @@ PrefsWindow::PrefsWindow(Settings& settings, BMessenger target)
 			.AddGroup(B_VERTICAL, 0)
 				.Add(new BStringView("profile", profileNote.String()))
 				.Add(new BStringView("note", "Changes to the hardware "
-					"restart the machine."))
+					"restart the machine (not a new floppy or CD)."))
 			.End()
 			.AddGlue()
 			.Add(cancel)
@@ -287,14 +288,12 @@ PrefsWindow::_MachinePage()
 	static const int32 kModelValues[] = { 66, 133, 25 };
 	BMenuField* model = _PopUp("Model:", kModels, kModelValues, 3,
 		machine.model == MachineConfig::kBeBox133 ? 133
-			: machine.model == MachineConfig::kHobbit ? 25 : 66, &fModel);
-	static const char* const kMemory[] = { "4 MB", "8 MB", "16 MB", "20 MB",
-		"24 MB", "32 MB", "48 MB", "64 MB", "96 MB", "128 MB", "192 MB",
-		"256 MB" };
-	static const int32 kMemoryValues[] = { 4, 8, 16, 20, 24, 32, 48, 64, 96,
-		128, 192, 256 };
-	BMenuField* memory = _PopUp("Memory:", kMemory, kMemoryValues, 12,
-		machine.ramMB, &fMemory);
+			: machine.model == MachineConfig::kHobbit ? 25 : 66, &fModel,
+		kMsgModel);
+	fMemory = new BPopUpMenu("");
+	BMenuField* memory = new BMenuField("Memory:", fMemory);
+	_UpdateMemoryMenu(machine.model == MachineConfig::kHobbit,
+		machine.ramMB);
 	static const char* const kCpus[] = { "Two (as built)",
 		"One (CPU 1 held in reset)" };
 	static const int32 kCpuValues[] = { 2, 1 };
@@ -324,10 +323,10 @@ PrefsWindow::_MachinePage()
 		.AddMenuField(revision, 0, 3)
 		.AddMenuField(ioCard, 0, 4)
 		.AddMenuField(speed, 0, 5)
-		.Add(new BStringView("hobbit", "The BeBox takes 8 to 256 MB, the "
-			"Hobbit prototype 4, 8, 16, 20 or 32 MB"), 0, 6, 2)
-		.Add(new BStringView("hobbit2", "(other sizes: the next smaller "
-			"one). Motherboard and I/O card are BeBox options."), 0, 7, 2)
+		.Add(new BStringView("hobbit", "The Hobbit prototype takes the "
+			"memory sizes its kernel knows (4 to 32 MB)."), 0, 6, 2)
+		.Add(new BStringView("hobbit2", "Motherboard and I/O card are "
+			"BeBox options."), 0, 7, 2)
 		.AddGlue(0, 8, 2);
 	return page;
 }
@@ -761,6 +760,36 @@ PrefsWindow::_PopUp(const char* label, const char* const* items,
 }
 
 
+// The memory sizes the model takes: SIMM pairs on the BeBox, the sizes its
+// kernel knows on the Hobbit. A size in between becomes the next smaller
+// one, as the machine would use it.
+void
+PrefsWindow::_UpdateMemoryMenu(bool hobbit, int32 current)
+{
+	static const int32 kBeBoxSizes[] = { 8, 16, 24, 32, 48, 64, 96, 128,
+		192, 256, 384, 512 };
+	static const int32 kHobbitSizes[] = { 4, 8, 16, 20, 32 };
+	const int32* sizes = hobbit ? kHobbitSizes : kBeBoxSizes;
+	int count = hobbit ? 5 : 12;
+	int32 selected = sizes[0];
+	for (int i = 0; i < count; i++) {
+		if (sizes[i] <= current)
+			selected = sizes[i];
+	}
+	fMemory->RemoveItems(0, fMemory->CountItems(), true);
+	for (int i = 0; i < count; i++) {
+		BMessage* message = new BMessage('nop ');
+		message->AddInt32("value", sizes[i]);
+		BString label;
+		label << sizes[i] << " MB";
+		BMenuItem* item = new BMenuItem(label.String(), message);
+		fMemory->AddItem(item);
+		if (sizes[i] == selected)
+			item->SetMarked(true);
+	}
+}
+
+
 int32
 PrefsWindow::_Selected(BPopUpMenu* menu) const
 {
@@ -927,7 +956,7 @@ PrefsWindow::_Apply()
 	}
 	machine.floppyImage = fFloppy->Text();
 	machine.floppyWriteProtected = fFloppyProtected->Value() != 0;
-	// a device without an image would stop the machine from starting
+	// a disk without an image would stop the machine from starting
 	Settings::DropEmptyDevices(machine);
 	BString romDirectory = fRomFolder->Text();
 	BString bootRomImage = fBootRom->Text();
@@ -944,15 +973,25 @@ PrefsWindow::_Apply()
 		|| machine.quantumUs != old.quantumUs
 		|| machine.cpiPercent != old.cpiPercent
 		|| machine.threadPerCpu != old.threadPerCpu
-		|| machine.floppyImage != old.floppyImage
-		|| machine.floppyWriteProtected != old.floppyWriteProtected
 		|| machine.hobbitKernelPath != old.hobbitKernelPath
 		|| romDirectory != fSettings.romDirectory || resetFlash;
 	for (int i = 0; i < 2; i++) {
 		restart |= machine.ideImage[i] != old.ideImage[i]
 			|| machine.ideReadOnly[i] != old.ideReadOnly[i];
 	}
+	// the floppy and the CDs change while the machine runs
+	BMessage message(kMsgPreferencesChanged);
+	if (machine.floppyImage != old.floppyImage
+		|| machine.floppyWriteProtected != old.floppyWriteProtected)
+		message.AddBool("floppy", true);
 	for (int id = 0; id < 7; id++) {
+		bool cd = machine.scsi[id].kind == MachineConfig::ScsiTarget::kCdRom
+			&& old.scsi[id].kind == MachineConfig::ScsiTarget::kCdRom;
+		if (cd && machine.scsi[id].image != old.scsi[id].image) {
+			message.AddInt32("cd", id);
+			message.AddString("cd old", old.scsi[id].image.c_str());
+			continue;
+		}
 		restart |= machine.scsi[id].kind != old.scsi[id].kind
 			|| machine.scsi[id].image != old.scsi[id].image
 			|| machine.scsi[id].readOnly != old.scsi[id].readOnly;
@@ -999,7 +1038,6 @@ PrefsWindow::_Apply()
 	fSettings.showLeds = fShowLeds->Value() != 0;
 	fSettings.speedLimit = _Selected(fSpeed);
 
-	BMessage message(kMsgPreferencesChanged);
 	message.AddBool("restart", restart);
 	message.AddBool("reset_flash", resetFlash);
 	fTarget.SendMessage(&message);
@@ -1017,6 +1055,9 @@ PrefsWindow::MessageReceived(BMessage* message)
 				fPages->SetVisibleItem(index);
 			break;
 		}
+		case kMsgModel:
+			_UpdateMemoryMenu(_Selected(fModel) == 25, _Selected(fMemory));
+			break;
 		case kMsgSerialKind:
 			_UpdateSerialHints();
 			break;
@@ -1132,6 +1173,21 @@ PrefsWindow::MessageReceived(BMessage* message)
 					? kMsgResetFlash : kMsgClearNvram);
 			}
 			break;
+		case kMsgMediaChanged:
+		{
+			// inserted or ejected in the machine window
+			const char* path;
+			if (message->FindString("floppy", &path) == B_OK)
+				fFloppy->SetText(path);
+			int32 id;
+			for (int32 i = 0; message->FindInt32("id", i, &id) == B_OK
+					&& message->FindString("path", i, &path) == B_OK; i++) {
+				if (id >= 0 && id < 7 && _Selected(fScsiKind[id])
+						== MachineConfig::ScsiTarget::kCdRom)
+					fScsi[id]->SetText(path);
+			}
+			break;
+		}
 		case kMsgOk:
 			_Apply();
 			Quit();

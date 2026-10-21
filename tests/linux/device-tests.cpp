@@ -1,25 +1,36 @@
 /*
  * BeBox emulator - device tests: the game port A/D converter, the S3
  * Vision864's RAMDAC access, graphics engine and cursor, the Cirrus
- * GD5434's cursor and the NE2000.
+ * GD5434's cursor, the NE2000, the SCSI CD-ROM's disc changes, the
+ * boot ROM's debug output key and the MPC105's memory banks.
  * Copyright 2026, the BeBox emulator authors. MIT License.
  */
 #include "core/board/BootItems.h"
 #include "core/board/Scheduler.h"
 #include "core/bus/IoSpace.h"
+#include "core/bus/Mpc105.h"
+#include "core/bus/PciBus.h"
 #include "core/bus/PhysBus.h"
 #include "core/host/NetworkBackend.h"
 #include "core/host/VideoSink.h"
 #include "core/isa/JoystickAdc.h"
+#include "core/isa/Kbc8042.h"
 #include "core/isa/Ne2000.h"
 #include "core/isa/Rtc146818.h"
+#include "core/isa/Uart16550.h"
+#include "core/pci/ScsiDevice.h"
+#include "core/storage/CdImage.h"
+#include "core/storage/DiskImage.h"
 #include "core/video/CirrusGd5434.h"
 #include "core/video/S3Vision864.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <vector>
+
+#include <unistd.h>
 
 using namespace bebox;
 
@@ -543,6 +554,300 @@ TestNe2000()
 	out(base, 0x22);
 }
 
+// One command (CDB bytes) on a SCSI device; returns the status.
+u8
+RunScsi(ScsiDevice& device, std::initializer_list<u8> cdb,
+	std::vector<u8>* dataIn = nullptr)
+{
+	ScsiCommand command;
+	memset(command.cdb, 0, sizeof(command.cdb));
+	for (u8 byte : cdb)
+		command.cdb[command.cdbLength++] = byte;
+	device.Execute(command);
+	if (dataIn != nullptr)
+		*dataIn = command.dataIn;
+	return command.status;
+}
+
+
+// The sense key and code REQUEST SENSE reports, as 0xKKAA.
+u32
+ScsiSense(ScsiDevice& device)
+{
+	std::vector<u8> sense;
+	if (RunScsi(device, { 0x03, 0, 0, 0, 18, 0 }, &sense) != kScsiStatusGood
+		|| sense.size() < 13)
+		return 0xffff;
+	return (u32)(sense[2] & 0x0f) << 8 | sense[12];
+}
+
+
+// A disc changed while the machine runs: unit attention "medium may have
+// changed" once, the guest's eject reported to the front end, and the
+// host's eject even of a disc the guest has locked in.
+void
+TestCdChange()
+{
+	char path[] = "/tmp/bebox-cd-XXXXXX";
+	int fd = mkstemp(path);
+	if (fd < 0) {
+		Check(false, "CD: temporary image");
+		return;
+	}
+	std::vector<u8> sectors(16 * 2048, 0);
+	memcpy(&sectors[2048], "DISC", 4);
+	bool written = write(fd, sectors.data(), sectors.size())
+		== (ssize_t)sectors.size();
+	close(fd);
+	std::string isoPath = std::string(path) + ".iso";
+	rename(path, isoPath.c_str());
+	Check(written, "CD: temporary image");
+	std::string error;
+
+	Scheduler scheduler;
+	const u64 ticksPerSecond = 1000;
+	ScsiCd cd(scheduler, ticksPerSecond, "TOSHIBA", "CD-ROM XM-3401TA");
+	std::string ejected;
+	cd.SetEjectCallback([&ejected](const std::string& image) {
+		ejected = image;
+	});
+	cd.Reset();
+	static const std::initializer_list<u8> kTestUnitReady
+		= { 0x00, 0, 0, 0, 0, 0 };
+	Check(RunScsi(cd, kTestUnitReady) == kScsiStatusCheckCondition
+		&& ScsiSense(cd) == 0x23a, "CD: empty drive is not ready");
+
+	cd.Insert(CdImage::Open(isoPath, error));
+	Check(RunScsi(cd, kTestUnitReady) == kScsiStatusCheckCondition
+		&& ScsiSense(cd) == 0x628, "CD: insert reports a medium change");
+	Check(RunScsi(cd, kTestUnitReady) == kScsiStatusGood,
+		"CD: then ready");
+	std::vector<u8> data;
+	Check(RunScsi(cd, { 0x28, 0, 0, 0, 0, 1, 0, 0, 1, 0 }, &data)
+			== kScsiStatusGood && data.size() == 2048
+			&& memcmp(data.data(), "DISC", 4) == 0,
+		"CD: reads the new disc");
+	Check(cd.MediumPath() == isoPath, "CD: medium path");
+
+	// locked by the guest: its eject is refused, the host's is not
+	RunScsi(cd, { 0x1e, 0, 0, 0, 1, 0 });
+	Check(RunScsi(cd, { 0x1b, 0, 0, 0, 2, 0 }) == kScsiStatusCheckCondition
+		&& cd.HasMedium() && ejected.empty(),
+		"CD: guest eject refused while locked");
+	cd.Eject();
+	Check(RunScsi(cd, kTestUnitReady) == kScsiStatusCheckCondition
+		&& ScsiSense(cd) == 0x628
+		&& RunScsi(cd, kTestUnitReady) == kScsiStatusCheckCondition
+		&& ScsiSense(cd) == 0x23a, "CD: host eject, then not ready");
+
+	// the guest's eject
+	cd.Insert(CdImage::Open(isoPath, error));
+	RunScsi(cd, kTestUnitReady);
+	RunScsi(cd, { 0x1e, 0, 0, 0, 0, 0 });
+	Check(RunScsi(cd, { 0x1b, 0, 0, 0, 2, 0 }) == kScsiStatusGood
+		&& !cd.HasMedium() && ejected == isoPath,
+		"CD: guest eject reported");
+
+	// a disc in the drive at power on raises no unit attention
+	cd.Insert(CdImage::Open(isoPath, error));
+	cd.Reset();
+	Check(RunScsi(cd, kTestUnitReady) == kScsiStatusGood,
+		"CD: no unit attention after reset");
+
+	// a change: the old disc comes out at once, the new one goes in
+	// kChangeSeconds later
+	cd.Change(CdImage::Open(isoPath, error));
+	Check(RunScsi(cd, kTestUnitReady) == kScsiStatusCheckCondition
+		&& ScsiSense(cd) == 0x628
+		&& RunScsi(cd, kTestUnitReady) == kScsiStatusCheckCondition
+		&& ScsiSense(cd) == 0x23a, "CD: change takes the old disc out");
+	u64 now = (ScsiCd::kChangeSeconds - 1) * ticksPerSecond;
+	scheduler.SetNow(now);
+	scheduler.RunDue(now);
+	Check(!cd.HasMedium(), "CD: drive empty during the change");
+	now = ScsiCd::kChangeSeconds * ticksPerSecond;
+	scheduler.SetNow(now);
+	scheduler.RunDue(now);
+	Check(cd.HasMedium()
+		&& RunScsi(cd, kTestUnitReady) == kScsiStatusCheckCondition
+		&& ScsiSense(cd) == 0x628
+		&& RunScsi(cd, kTestUnitReady) == kScsiStatusGood,
+		"CD: then the new disc is in");
+	// ejected during a change: stays empty
+	cd.Change(CdImage::Open(isoPath, error));
+	cd.Change(nullptr);
+	now += (ScsiCd::kChangeSeconds + 1) * ticksPerSecond;
+	scheduler.SetNow(now);
+	scheduler.RunDue(now);
+	Check(!cd.HasMedium(), "CD: eject cancels a change");
+	// into an empty drive: at once
+	cd.Change(CdImage::Open(isoPath, error));
+	Check(cd.HasMedium(), "CD: change into an empty drive");
+	unlink(isoPath.c_str());
+}
+
+
+// F1 held for the boot ROM's debug output (BeBoxMachine::HoldDebugOutputKey)
+// goes down once the ROM turns scan code translation off and up as soon as
+// serial 4 sends a byte: the UART reports the bytes it sends (not those
+// looped back), the keyboard controller presses a key only untranslated and
+// releases it before its time.
+void
+TestDebugKeyRelease()
+{
+	Scheduler scheduler;
+	const u64 ticksPerSecond = 1000000;		// 1 tick = 1 us
+	u64 now = 0;
+	auto run = [&](u64 ticks) {
+		now += ticks;
+		scheduler.SetNow(now);
+		scheduler.RunDue(now);
+	};
+
+	Uart16550 uart("serial4", 0x388, 8000000, scheduler, ticksPerSecond,
+		false);
+	std::vector<u8> sent;
+	uart.SetTransmitCallback([&sent](u8 byte) { sent.push_back(byte); });
+	uart.IoWrite8(0x38c, 0x10);		// MCR: loopback
+	uart.IoWrite8(0x388, 'x');
+	run(1000);
+	Check(sent.empty() && uart.IoRead8(0x388) == 'x',
+		"debug key: looped back bytes are not sent");
+	uart.IoWrite8(0x38c, 0x00);
+	uart.IoWrite8(0x388, 'B');
+	Check(sent.empty(), "debug key: byte reported once sent");
+	run(1000);		// divisor 12 at 8 MHz: 0.24 ms per character
+	Check(sent.size() == 1 && sent[0] == 'B', "debug key: sent byte reported");
+
+	Kbc8042 kbc(scheduler, ticksPerSecond);
+	auto read = [&]() {
+		std::vector<u8> bytes;
+		for (int i = 0; i < 100; i++) {
+			run(200);
+			if ((kbc.IoRead8(0x64) & 0x01) != 0)
+				bytes.push_back(kbc.IoRead8(0x60));
+		}
+		return bytes;
+	};
+	kbc.HoldKey(0x05, 60 * ticksPerSecond);	// F1 (set 1: 3b)
+	std::vector<u8> bytes = read();
+	Check(bytes.size() == 1 && bytes[0] == 0x3b, "debug key: F1 down");
+	kbc.ReleaseHeldKey();
+	bytes = read();
+	Check(bytes.size() == 1 && bytes[0] == 0xbb,
+		"debug key: F1 up before its time");
+	run(61 * ticksPerSecond);
+	bytes = read();
+	Check(bytes.empty(), "debug key: no repeat or second release");
+
+	// the boot ROM's keyboard setup: controller self-test, keyboard
+	// interface on, translation off (command byte 05)
+	kbc.Reset();
+	kbc.HoldKeyUntranslated(0x05, 60 * ticksPerSecond);
+	run(2 * ticksPerSecond);
+	kbc.IoWrite8(0x64, 0xaa);
+	bytes = read();
+	kbc.IoWrite8(0x64, 0xae);
+	run(1000);
+	Check(bytes.size() == 1 && bytes[0] == 0x55 && read().empty()
+			&& !kbc.HoldingKey(),
+		"debug key: F1 up while translating");
+	kbc.IoWrite8(0x64, 0x60);
+	run(100);
+	kbc.IoWrite8(0x60, 0x05);
+	bytes = read();
+	Check(bytes.size() == 1 && bytes[0] == 0x05 && kbc.HoldingKey(),
+		"debug key: F1 down once untranslated");
+	run(ticksPerSecond);
+	bytes = read();
+	Check(bytes.size() > 5 && bytes.back() == 0x05,
+		"debug key: F1 repeats");
+	kbc.ReleaseHeldKey();
+	bytes = read();
+	Check(bytes.size() == 2 && bytes[0] == 0xf0 && bytes[1] == 0x05,
+		"debug key: then up");
+}
+
+
+// The 1.1d7 nub's bank sizing (0xfff00570): the bank gets a 128 MB window
+// at 'base'; the row bit count (MCCR1) is the largest whose top row bit
+// does not alias the window's start, then the size halves while the top
+// column bit aliases (three times at most).
+u32
+NubBankSize(PhysBus& bus, Mpc105& bridge, int bank, u32 base)
+{
+	u32 end = base + 0x08000000 - 1;
+	bridge.ConfigWrite(0x80 + bank, (base >> 20) & 0xff, 1);
+	bridge.ConfigWrite(0x88 + bank, base >> 28, 1);
+	bridge.ConfigWrite(0x90 + bank, (end >> 20) & 0xff, 1);
+	bridge.ConfigWrite(0x98 + bank, end >> 28, 1);
+	bridge.ConfigWrite(0xa0, 1 << bank, 1);
+	auto aliases = [&](u32 offset) {	// 0xfff00708
+		bus.Write32(base + offset, 0xb6db6db6, 0);
+		bus.Write32(base, 0x6db6db6d, 0);
+		return bus.Read32(base + offset, 0) != 0xb6db6db6;
+	};
+	u32 size = 0x08000000;
+	int rows = 3;
+	for (; rows >= 0; rows--, size >>= 1) {
+		u32 mccr1 = bridge.ConfigRead(0xf0, 4, 0);
+		mccr1 = (mccr1 & ~(3u << (2 * bank))) | (u32)rows << (2 * bank);
+		bridge.ConfigWrite(0xf0, mccr1, 4);
+		if (!aliases(size >> 5))
+			break;
+	}
+	if (rows < 0)
+		return 0;
+	for (int i = 0; i < 3 && aliases(size >> 1); i++)
+		size >>= 1;
+	return size;
+}
+
+
+// The MPC105 multiplexes the address onto the DRAMs' rows and columns by
+// MCCR1's row bit count for the bank: the nub finds every bank size from
+// 2 to 128 MB that way (8 MB: 10 x 10 bits), in any probe window, and the
+// bank is then linear memory.
+void
+TestMemoryBanks()
+{
+	char what[80];
+	for (u32 megabytes = 2; megabytes <= 128; megabytes *= 2) {
+		for (u32 base = 0; base <= 0x08000000; base += 0x08000000) {
+			PhysBus bus;
+			IoSpace io;
+			PciBus pci;
+			Mpc105 bridge(bus, io, pci);
+			u32 bytes = megabytes << 20;
+			std::vector<u8> memory(bytes);
+			bridge.SetBank(2, memory.data(), bytes);
+			u32 found = NubBankSize(bus, bridge, 2, base);
+			snprintf(what, sizeof(what), "memory: nub sizes a %u MB bank "
+				"at %u MB", megabytes, base >> 20);
+			Check(found == bytes, what);
+			if (found != bytes || base != 0)
+				continue;
+			// moved to the bottom (the 1.1d7 nub moves the banks down
+			// after the ones found before)
+			bridge.ConfigWrite(0x80 + 2, 0, 1);
+			bridge.ConfigWrite(0x88 + 2, 0, 1);
+			bridge.ConfigWrite(0x90 + 2, (bytes - 1) >> 20, 1);
+			bridge.ConfigWrite(0x98 + 2, (bytes - 1) >> 28, 1);
+			bool linear = true;
+			for (u32 address = 0; address < bytes; address += 0x800)
+				bus.Write32(address, address, 0);
+			for (u32 address = 0; address < bytes; address += 0x800) {
+				if (bus.Read32(address, 0) != address
+					|| LoadBE32(&memory[address]) != address)
+					linear = false;
+			}
+			snprintf(what, sizeof(what), "memory: %u MB bank linear",
+				megabytes);
+			Check(linear, what);
+		}
+	}
+}
+
 }	// namespace
 
 
@@ -557,6 +862,9 @@ main()
 	TestS3Engine();
 	TestS3Cursor();
 	TestCirrusCursor();
+	TestCdChange();
+	TestDebugKeyRelease();
+	TestMemoryBanks();
 	printf("%d failures\n", sFailures);
 	return sFailures == 0 ? 0 : 1;
 }

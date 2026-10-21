@@ -72,8 +72,9 @@ Not emulated yet: the parallel port, GeekPort, MIDI and infrared ports.
 3. **Machine > Power on**. The newer boot ROMs stop at their boot menu when
    no boot volume is set yet: press Return.
 
-Changes to the hardware restart the machine. A device type set without a
-file is turned back into "None" when the preferences are saved.
+Changes to the hardware restart the machine; a new floppy or CD goes into
+the running one. A disk set without a file is turned back into "None" when
+the preferences are saved (a CD-ROM drive stays, empty).
 
 ## The Hobbit prototype
 
@@ -176,12 +177,13 @@ became the profile "Default".
 | Preview Release 1 | PR2's | yes | - |
 | Preview Release 2 | from its CD | yes | yes |
 | R3 | from its CD | yes | yes |
+| R4 | from its CD | yes | yes |
 | R4.5 | from its CD | yes | yes |
 | R5.0.3 | R3's | yes | yes |
 
-"-" means not tried yet. The DR8.2 image is a Mac updater, and the R4 image
-is x86 only. The boot ROM from the R3 CD works with every release tested
-here, so one profile with it can run them all.
+"-" means not tried yet. The DR8.2 image is a Mac updater. The boot ROM
+from the R3 CD works with every release tested here, so one profile with
+it can run them all.
 
 DR6 predates the 1.1d7 boot ROM: BeBox hands its kernel the PCI device
 table in the older format it expects. Install it as the CD says: boot the
@@ -190,6 +192,19 @@ left pop-up menu), then install onto it and make it the startup disk.
 DR6's mouse driver moves the pointer twice as far left and down as right
 and up (that is DR6, not the emulation). The Developer Releases' `date`
 prints the year as years since 1900 (126 for 2026).
+
+The BeBox takes 8 to 512 MB of memory (**Preferences > Machine**). Be's
+FAQ promised up to 1 GB with 64 and 128 MB SIMMs, though Be only tested
+32 MB SIMMs; the boot ROM's memory test accepts 512 MB at most (it turns
+off every 128 MB bank but the first, so 1 GB would show up as 128 MB). R3
+and R4.5 see and use all 512 MB. DR8 boots with up to 96 MB: from 128 MB
+on its kernel stops at "swap_file_offset: should never happen". At the
+other end, DR8, R3 and R4.5 all run in 8 MB (a pair of 4 MB SIMMs), but
+the R4.5 boot ROM does not: it puts its heap at half the memory, which
+with 8 MB is right on top of its own code, so it crashes before loading
+anything. Boot R4.5 in 8 MB with the R3 boot ROM. The memory test at
+power on takes 2 s per 32 MB on the 66 MHz model (32 s with 512 MB) and
+half as long on the 133 MHz one.
 
 ## Using it
 
@@ -200,10 +215,18 @@ prints the year as years since 1900 (126 for 2026).
 - **Game ports** in the preferences connects host joysticks to the four
   sticks (two per game port, as with Y cables).
 - The status line shows the floppy, CD and hard disk (with the disk
-  activity); click the floppy to insert one.
+  activity); click the floppy or the CD to insert one.
+- **Media** inserts and ejects floppies and CDs while the machine runs
+  (for a CD, give a SCSI ID a CD-ROM drive in **Preferences > Storage**;
+  it may be left empty). BeOS mounts a CD by itself a few seconds after
+  it goes in. A CD that replaces another one stays out for six seconds
+  first: BeOS checks the drive every five seconds and only notices the new
+  disc after it has seen the drive empty. A CD that BeOS ejects (CDPlayer's
+  Eject button, `eject`) leaves the drive empty.
 - **Machine** has the power, reset and interrupt switches, and restarts with
   the boot menu or with kernel debug output on serial port 4 (that holds
-  F1 at power on, as on a real BeBox). **Send Ctrl+Alt+Delete** gives BeOS
+  F1 at power on, as on a real BeBox, until the boot ROM starts writing to
+  serial port 4). **Send Ctrl+Alt+Delete** gives BeOS
   the keys Haiku keeps for itself: BeOS R3 and later show their Team
   Monitor, and restart when it is sent again.
 - The two processors run on two host cores when both are busy
@@ -276,10 +299,12 @@ hey BeBox get Speed of Window BeBox            # percent of real time
 hey BeBox get LedLevels of Window BeBox        # left, right (0-15)
 hey BeBox get SerialLog 4 of Window BeBox      # a console port's output
 hey BeBox set Floppy of Window BeBox to /path/disk.img
+hey BeBox set CdRom of Window BeBox to /path/disc.iso   # "" ejects
 hey BeBox type of Window BeBox with text=ls    # types on the keyboard
 hey BeBox shot of Window BeBox with path=/tmp/screen.png
 ```
 
+`CdRom` is the first CD-ROM drive, `CdRom 3` the one on SCSI ID 3.
 Also `get Mips`, `get EmulatedTime`, `get DiskLed`, `get AudioStats` (the
 sound output's counters: underruns are gaps), `get Profiles`, `get Profile`
 and `set Profile` (switches, restarting a running machine), and the
@@ -294,7 +319,8 @@ action.
 [--scsiN-disk FILE]
 [--scsiN-cd FILE] [--scsiN-share FOLDER] [--ide0 FILE] [--floppy FILE]
 [--net] [--net-forward SPEC] [--power-on]` sets up the machine (the
-settings are kept). `--profile` switches to a profile first, making it as a
+settings are kept; an empty FILE removes the device, or leaves the CD-ROM
+drive empty). `--profile` switches to a profile first, making it as a
 copy of the current one if there is none; the other options change that
 profile.
 

@@ -27,6 +27,8 @@ class NetworkBackend;
 class PhysBus;
 class Rtc146818;
 class Scheduler;
+class ScsiCd;
+class ScsiDevice;
 class SerialBackend;
 class VgaCore;
 class VideoSink;
@@ -45,6 +47,11 @@ public:
 	virtual	void				PowerOn() = 0;
 			// Front panel Interrupt switch (pressed for 50 ms).
 	virtual	void				PressInterruptSwitch() = 0;
+			// Holds F1 from now on (right after PowerOn()), which makes
+			// the boot ROM send the kernel's debug output to serial port
+			// 4, until the ROM shows that it saw the key. Machines
+			// without such a boot ROM ignore it.
+	virtual	void				HoldDebugOutputKey() {}
 			// Saves the flash and NVRAM if they changed.
 	virtual	bool				SavePersistentState(std::string& error) = 0;
 			// Keeps the flash and NVRAM in other files from now on (a
@@ -71,6 +78,9 @@ public:
 			// The internal floppy drive's unit number on the controller.
 	virtual	int					FloppyUnit() const { return 0; }
 	virtual	JoystickAdc*		GamePorts() = 0;
+			// The CD-ROM drive on SCSI ID 'id' (0-6); null when that ID
+			// has none.
+			ScsiCd*				CdRom(int id);
 	virtual	VgaCore*			Video() const = 0;
 
 	virtual	int					SerialPortCount() const = 0;
@@ -96,6 +106,9 @@ public:
 	virtual	std::string			CpuState(int cpu) const = 0;
 			// The physical address of a virtual one, as the CPU sees it.
 	virtual	bool				DebugTranslate(int cpu, u32 va, u32& pa) = 0;
+
+protected:
+	virtual	ScsiDevice*			ScsiTarget(int id) = 0;
 };
 
 }	// namespace bebox

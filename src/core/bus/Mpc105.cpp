@@ -152,8 +152,14 @@ Mpc105::~Mpc105()
 void
 Mpc105::SetBank(int index, u8* host, u32 size)
 {
-	fBanks[index].host = host;
-	fBanks[index].size = size;
+	// 2 MB: 9 row and 9 column bits, 4 MB: 10 x 9, 8 MB: 10 x 10, 16 MB:
+	// 11 x 10, ... 128 MB: 12 x 12 (manual, table 6-2), 8 bytes a column
+	Bank& bank = fBanks[index];
+	bank.host = host;
+	bank.size = size;
+	int addressBits = size != 0 ? __builtin_ctz(size) - 3 : 0;
+	bank.rowBits = (addressBits + 1) / 2;
+	bank.columnBits = addressBits - bank.rowBits;
 }
 
 
@@ -193,7 +199,9 @@ Mpc105::ConfigRegisterWritten(u32 reg)
 	picr1 = (picr1 & ~0x00118000u) | 0x00110000u;
 	StoreLE32(&fConfig[0xa8], picr1);
 
-	if (memcmp(fMappedConfig, &fConfig[0x80], sizeof(fMappedConfig)) != 0)
+	if (memcmp(fMappedConfig, &fConfig[0x80], sizeof(fMappedConfig)) != 0
+		|| memcmp(fMappedRowBits, &fConfig[0xf0], sizeof(fMappedRowBits))
+			!= 0)
 		_UpdateMemoryMap();
 }
 
@@ -220,8 +228,10 @@ void
 Mpc105::_UpdateMemoryMap()
 {
 	memcpy(fMappedConfig, &fConfig[0x80], sizeof(fMappedConfig));
+	memcpy(fMappedRowBits, &fConfig[0xf0], sizeof(fMappedRowBits));
 	fBus.Unmap(0, 0x40000000);
 	u8 enabled = fConfig[0xa0];
+	u32 rowConfig = LoadLE16(&fConfig[0xf0]);
 	for (int bank = 0; bank < 8; bank++) {
 		if ((enabled & (1 << bank)) == 0)
 			continue;
@@ -235,14 +245,29 @@ Mpc105::_UpdateMemoryMap()
 			fBus.MapDevice(start, length, fEmptyBank);
 			continue;
 		}
-		// Address bits above the SIMM size are not decoded: the bank is
-		// mirrored over its window (the ROM sizes memory this way).
-		for (u32 offset = 0; offset < length; offset += memory.size) {
-			u32 chunk = std::min(memory.size, length - offset);
-			fBus.MapMemory(start + offset, chunk, memory.host, true);
+		// The address goes to the DRAMs multiplexed (manual, figure 6-6,
+		// 64-bit mode): bits 3-10 are column bits 0-7, the 12 bits above
+		// them the row, and the 4 bits above the bank's row bit count in
+		// MCCR1 column bits 8-11. The DRAMs decode only the row and column
+		// bits they have, so the other address bits alias: the nub sizes
+		// each bank with that, first its row bit count, then the columns.
+		// A run of 2^11 times the rows decoded is linear.
+		int rows = 9 + ((rowConfig >> (2 * bank)) & 3);
+		u32 run = 1u << (11 + std::min(rows, memory.rowBits));
+		for (u32 address = start; address <= end; ) {
+			u32 row = (address >> 11) & ((1u << memory.rowBits) - 1);
+			u32 column = (address >> (11 + rows))
+				& ((1u << (memory.columnBits - 8)) - 1);
+			u32 offset = (address & 0x7ff) | row << 11
+				| column << (11 + memory.rowBits);
+			u32 chunk = std::min(run - (address & (run - 1)),
+				end - address + 1);
+			fBus.MapMemory(address, chunk, memory.host + offset, true);
+			address += chunk;
 		}
-		BB_LOG(kLogBus, kLogDebug, "bank %d: %08x-%08x (%u MB SIMM)", bank,
-			start, end, memory.size >> 20);
+		BB_LOG(kLogBus, kLogDebug, "bank %d: %08x-%08x (%u MB, %d x %d, "
+			"MCCR1 %d row bits)", bank, start, end, memory.size >> 20,
+			memory.rowBits, memory.columnBits, rows);
 	}
 }
 

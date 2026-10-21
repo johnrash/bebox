@@ -10,9 +10,10 @@
 # Needs here: ROMs/ (bootnub.rom, bootmain.rom) and work/disks/dr8.qcow2
 # (DR8 installed); for the typing test also the R3 CD image and
 # work/roms/r3_bebox_bootmain.image (tools/extract-rom-images.sh); for the
-# sound test work/disks/r45.qcow2 and r45.nvram (R4.5 installed) and
-# work/roms/r45_bebox_bootmain.image. The pointer and sound tests need
-# BeNC's sendinput on the Haiku machine.
+# sound and CD-ROM tests work/disks/r45.qcow2 and r45.nvram (R4.5
+# installed) and work/roms/r45_bebox_bootmain.image (the CD-ROM test
+# inserts the R3 CD). The pointer and sound tests need BeNC's sendinput on
+# the Haiku machine.
 set -u
 cd "$(dirname "$0")/.."
 VM=${1:?usage: vm-test.sh user@haiku-host}
@@ -226,6 +227,44 @@ if [ -f "$R45_DISK" ] && [ -f "$R45_NVRAM" ] \
 		--scsi0-disk /tmp/bebox-sound.qcow2 --scsi3-cd "''"
 	check "--profile makes a profile" "R4.5 sound" "$(get Profile)"
 	sleep 50
+	if vm 'test -s ~/BeBox/test/R3.iso'; then
+		echo "== CD-ROM changes while running (R4.5 mounts the R3 CD)"
+		check "empty CD-ROM drive" "" "$(get CdRom)"
+		vm "rm -f /tmp/bebox-cd-*.png; \
+			hey BeBox shot of Window BeBox with path=/tmp/bebox-cd-empty.png; \
+			hey -s BeBox set CdRom of Window BeBox \
+				to /boot/home/BeBox/test/R3.iso" >/dev/null
+		check "CD inserted" /boot/home/BeBox/test/R3.iso "$(get CdRom 3)"
+		check "Eject CD-ROM enabled" 1 \
+			"$(get Enabled of MenuItem 4 of Menu Media of View menu)"
+		sleep 12
+		vm "hey BeBox shot of Window BeBox with path=/tmp/bebox-cd-r3.png; \
+			hey -s BeBox set CdRom of Window BeBox to '\"\"'" >/dev/null
+		check "CD ejected" "" "$(get CdRom)"
+		sleep 12
+		vm "hey BeBox shot of Window BeBox with path=/tmp/bebox-cd-out.png" \
+			>/dev/null
+		check "missing CD image refused" ok "$(vm "hey BeBox set CdRom of \
+			Window BeBox to /nonexistent.iso" | grep -q 'could not be opened' \
+			&& echo ok)"
+		for shot in empty r3 out; do
+			rm -f "$OUT/cd-$shot.png"
+			scp -q -o BatchMode=yes "$VM:/tmp/bebox-cd-$shot.png" \
+				"$OUT/cd-$shot.png"
+		done
+		# the volume icon right of the Trash
+		check "BeOS mounts and unmounts the CD" "changed same" \
+			"$(python3 -c '
+import sys
+from PIL import Image
+def icon(name):
+	return Image.open(name).convert("RGB").crop((420, 20, 500, 70)).tobytes()
+empty, r3, out = (icon(sys.argv[1] + "/cd-" + n + ".png")
+	for n in ("empty", "r3", "out"))
+print("changed" if r3 != empty else "unchanged",
+	"same" if out == empty else "different")
+' "$OUT" 2>&1)"
+	fi
 	click() {
 		vm "bash ~/BeBox/test/guest-click.sh $*" >/dev/null
 	}

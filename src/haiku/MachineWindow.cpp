@@ -17,6 +17,8 @@
 #include "core/isa/Fdc82077.h"
 #include "core/isa/JoystickAdc.h"
 #include "core/isa/Kbc8042.h"
+#include "core/pci/ScsiDevice.h"
+#include "core/storage/CdImage.h"
 #include "core/storage/DiskImage.h"
 
 #include <Alert.h>
@@ -39,6 +41,7 @@
 #include <StringView.h>
 #include <TranslatorRoster.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <unistd.h>
@@ -66,6 +69,8 @@ MachineWindow::MachineWindow(Settings& settings)
 	fSettings(settings),
 	fConsoleMenu(nullptr),
 	fFloppyPanel(nullptr),
+	fCdItemsIndex(0),
+	fCdPanel(nullptr),
 	fModifiers(0),
 	fPowered(false),
 	fJoystickRunner(nullptr)
@@ -149,6 +154,7 @@ MachineWindow::~MachineWindow()
 		delete fConsoles[i];
 	}
 	delete fFloppyPanel;
+	delete fCdPanel;
 }
 
 
@@ -330,6 +336,9 @@ MachineWindow::_ApplySettings()
 	_BuildProfileMenu();
 	_UpdateMenus();
 	_UpdateStatus();
+	// the LEDs go with the profile's model (none on the Hobbit)
+	if (_UpdateLeds())
+		_FitWindow();
 }
 
 
@@ -351,7 +360,58 @@ MachineWindow::_BuildMediaMenu()
 	fEjectFloppyItem = new BMenuItem("Eject floppy",
 		new BMessage(kMsgEjectFloppy));
 	menu->AddItem(fEjectFloppyItem);
+	menu->AddSeparatorItem();
+	// the CD-ROM drives' items follow (_UpdateCdItems)
+	fCdItemsIndex = menu->CountItems();
+	fMediaMenu = menu;
 	return menu;
+}
+
+
+// An Insert and an Eject item per CD-ROM drive, with the SCSI ID when
+// there are several; disabled ones when there is none.
+void
+MachineWindow::_UpdateCdItems()
+{
+	std::vector<int> drives = _CdDrives();
+	if (drives != fCdItemDrives || fInsertCdItems.empty()) {
+		while (fMediaMenu->CountItems() > fCdItemsIndex)
+			delete fMediaMenu->RemoveItem(fCdItemsIndex);
+		fInsertCdItems.clear();
+		fEjectCdItems.clear();
+		size_t count = std::max<size_t>(drives.size(), 1);
+		for (size_t i = 0; i < count; i++) {
+			int id = i < drives.size() ? drives[i] : -1;
+			BString insert("Insert CD-ROM");
+			BString eject("Eject CD-ROM");
+			if (drives.size() > 1) {
+				BString suffix;
+				suffix.SetToFormat(" (SCSI ID %d)", id);
+				insert << suffix;
+				eject << suffix;
+			}
+			insert << B_UTF8_ELLIPSIS;
+			BMessage* insertMessage = new BMessage(kMsgInsertCd);
+			insertMessage->AddInt32("id", id);
+			BMessage* ejectMessage = new BMessage(kMsgEjectCd);
+			ejectMessage->AddInt32("id", id);
+			BMenuItem* insertItem = new BMenuItem(insert.String(),
+				insertMessage);
+			BMenuItem* ejectItem = new BMenuItem(eject.String(),
+				ejectMessage);
+			fMediaMenu->AddItem(insertItem);
+			fMediaMenu->AddItem(ejectItem);
+			fInsertCdItems.push_back(insertItem);
+			fEjectCdItems.push_back(ejectItem);
+		}
+		fCdItemDrives = drives;
+	}
+	for (size_t i = 0; i < fInsertCdItems.size(); i++) {
+		bool drive = i < drives.size();
+		fInsertCdItems[i]->SetEnabled(drive);
+		fEjectCdItems[i]->SetEnabled(drive
+			&& !fSettings.machine.scsi[drives[i]].image.empty());
+	}
 }
 
 
@@ -438,6 +498,7 @@ MachineWindow::PowerOn()
 		}
 	}
 	bebox::NetworkBackend* network = fNetwork.get();
+	BMessenger window(this);
 	HaikuAudio* audio = nullptr;
 	if (fSettings.soundEnabled) {
 		fAudio.SetVolume(fSettings.soundVolume / 100.0f);
@@ -445,7 +506,7 @@ MachineWindow::PowerOn()
 			audio = &fAudio;
 	}
 	if (!fEmulator.Start(config, error,
-			[screen, audio, serial, network](bebox::Machine& machine) {
+			[screen, audio, serial, network, window](bebox::Machine& machine) {
 				machine.SetVideoSink(screen);
 				machine.SetAudioSink(audio);
 				if (network != nullptr)
@@ -453,6 +514,18 @@ MachineWindow::PowerOn()
 				for (int i = 0; i < 4; i++) {
 					if (serial[i] != nullptr)
 						machine.SetSerialBackend(i, serial[i]);
+				}
+				// BeOS ejects a disc: the drive shows empty
+				for (int id = 0; id < 7; id++) {
+					bebox::ScsiCd* cd = machine.CdRom(id);
+					if (cd == nullptr)
+						continue;
+					cd->SetEjectCallback([window, id](const std::string& path) {
+						BMessage message(kMsgCdEjected);
+						message.AddInt32("id", id);
+						message.AddString("path", path.c_str());
+						window.SendMessage(&message);
+					});
 				}
 			})) {
 		BString text("The machine could not be started:\n\n");
@@ -510,6 +583,7 @@ MachineWindow::_UpdateMenus()
 	fShowLedsItem->SetEnabled(
 		fSettings.machine.model != bebox::MachineConfig::kHobbit);
 	fEjectFloppyItem->SetEnabled(!fSettings.machine.floppyImage.empty());
+	_UpdateCdItems();
 }
 
 
@@ -526,7 +600,9 @@ bool
 MachineWindow::_UpdateLeds()
 {
 	bool show = _ShowLeds();
-	if (show != fLeftLeds->IsHidden())
+	// the view's own state: IsHidden() also says true while the window is
+	// hidden, and a Show() too many would make a later Hide() do nothing
+	if (show != fLeftLeds->IsHidden(fLeftLeds))
 		return false;
 	if (show) {
 		fLeftLeds->Show();
@@ -582,6 +658,8 @@ MachineWindow::_UpdateStatus()
 		description << "Floppy: " << BPath(machine.floppyImage.c_str()).Leaf();
 	} else
 		description << "Floppy: empty (click to insert)";
+	// a click on the CD inserts into the first empty drive
+	bool clickTargetShown = false;
 	for (int id = 0; id < 7; id++) {
 		const bebox::MachineConfig::ScsiTarget& target = machine.scsi[id];
 		if (target.kind == bebox::MachineConfig::ScsiTarget::kNone)
@@ -592,6 +670,10 @@ MachineWindow::_UpdateStatus()
 		description << "\nSCSI " << id << (cd ? " CD-ROM: " : " disk: ")
 			<< (target.image.empty() ? "empty"
 				: BPath(target.image.c_str()).Leaf());
+		if (cd && target.image.empty() && !clickTargetShown) {
+			description << " (click to insert)";
+			clickTargetShown = true;
+		}
 	}
 	for (int i = 0; i < 2; i++) {
 		if (machine.ideImage[i].empty())
@@ -883,17 +965,28 @@ MachineWindow::MessageReceived(BMessage* message)
 			if (!fPowered && !PowerOn())
 				break;
 			_ReleaseAllKeys();
-			fEmulator.Post([](bebox::Machine& machine) {
-				machine.PowerOn();
-			});
-			// DR7/DR8 ROMs: any key; PR and later: left Shift. F1 sends
-			// the kernel's debug output to serial port 4.
-			// F1 must be up again before the ROM looks for keys that
-			// open its boot menu (about 6 s after power on).
+			// F1 sends the kernel's debug output to serial port 4; it
+			// goes up when the boot ROM starts writing there.
 			bool debug = message->what == kMsgBootWithDebug;
-			_HoldKeyDuringBoot(debug ? 0x05 : 0x12, debug ? 5.5 : 8);
-			if (debug && fSettings.serial[3] == "console")
-				_ShowConsole(3);
+			fEmulator.Post([debug](bebox::Machine& machine) {
+				machine.PowerOn();
+				if (debug)
+					machine.HoldDebugOutputKey();
+			});
+			if (debug) {
+				if (fSettings.serial[3] == "console")
+					_ShowConsole(3);
+				break;
+			}
+			// The boot menu: DR7/DR8 ROMs: any key; PR and later: left
+			// Shift, down when the ROM looks at the keyboard (about 6 s
+			// after power on with 32 MB; the memory test before takes
+			// 1/16 s per MB more at 66 MHz, half that at 133 MHz).
+			const bebox::MachineConfig& config = fSettings.machine;
+			double memoryTest = config.ramMB > 32
+				? (config.ramMB - 32) / (config.model
+					== bebox::MachineConfig::kBeBox133 ? 32.0 : 16.0) : 0;
+			_HoldKeyDuringBoot(0x12, 8 + memoryTest);
 			break;
 		}
 		case kMsgHeldKey:
@@ -967,6 +1060,55 @@ MachineWindow::MessageReceived(BMessage* message)
 		case kMsgEjectFloppy:
 			_EjectFloppy();
 			break;
+		case kMsgInsertCd:
+		{
+			// from the status line: the first empty drive, else the first
+			int32 id = message->GetInt32("id", -1);
+			std::vector<int> drives = _CdDrives();
+			for (size_t i = 0; id < 0 && i < drives.size(); i++) {
+				if (fSettings.machine.scsi[drives[i]].image.empty())
+					id = drives[i];
+			}
+			if (id < 0 && !drives.empty())
+				id = drives[0];
+			if (id >= 0)
+				_ShowCdPanel(id);
+			break;
+		}
+		case kMsgCdChosen:
+		{
+			entry_ref ref;
+			int32 id = message->GetInt32("id", -1);
+			if (message->FindRef("refs", &ref) != B_OK || id < 0 || id > 6)
+				break;
+			BPath path(&ref);
+			_InsertCd(id, path.Path());
+			break;
+		}
+		case kMsgEjectCd:
+		{
+			int32 id = message->GetInt32("id", -1);
+			if (id >= 0 && id < 7)
+				_EjectCd(id);
+			break;
+		}
+		case kMsgCdEjected:
+		{
+			// by BeOS: the drive is empty unless another disc went in since
+			int32 id = message->GetInt32("id", -1);
+			const char* path = message->GetString("path", "");
+			if (id < 0 || id > 6)
+				break;
+			bebox::MachineConfig::ScsiTarget& target
+				= fSettings.machine.scsi[id];
+			if (target.kind == bebox::MachineConfig::ScsiTarget::kCdRom
+				&& target.image == path) {
+				target.image.clear();
+				_MediaChanged();
+				_UpdateMenus();
+			}
+			break;
+		}
 		case kMsgPreferences:
 		{
 			BLooper* looper;
@@ -1110,8 +1252,30 @@ MachineWindow::MessageReceived(BMessage* message)
 				unlink(fSettings.FlashPath().String());
 			if (restart)
 				PowerOn();
-			else if (fPowered)
+			else if (fPowered) {
 				_OpenJoysticks();
+				// a new floppy or CD goes into the running machine
+				bebox::MachineConfig& machine = fSettings.machine;
+				if (message->GetBool("floppy", false)) {
+					std::string path = machine.floppyImage;
+					if (path.empty())
+						_EjectFloppy();
+					else
+						_InsertFloppy(path.c_str());
+				}
+				int32 id;
+				for (int32 i = 0; message->FindInt32("cd", i, &id) == B_OK;
+						i++) {
+					std::string path = machine.scsi[id].image;
+					if (path.empty())
+						_EjectCd(id);
+					else if (!_InsertCd(id, path.c_str())) {
+						// the old disc stays
+						machine.scsi[id].image
+							= message->GetString("cd old", i, "");
+					}
+				}
+			}
 			_UpdateMenus();
 			break;
 		}
@@ -1162,6 +1326,10 @@ static property_info kProperties[] = {
 	{ "Floppy", { B_GET_PROPERTY, B_SET_PROPERTY, 0 },
 		{ B_DIRECT_SPECIFIER, 0 },
 		"The floppy disk image; set \"\" to eject.", 0, { B_STRING_TYPE } },
+	{ "CdRom", { B_GET_PROPERTY, B_SET_PROPERTY, 0 },
+		{ B_DIRECT_SPECIFIER, B_INDEX_SPECIFIER, 0 },
+		"The disc image in the CD-ROM drive on a SCSI ID (or in the first "
+		"drive); set \"\" to eject.", 0, { B_STRING_TYPE } },
 	{ "AudioStats", { B_GET_PROPERTY, 0 }, { B_DIRECT_SPECIFIER, 0 },
 		"Sound output counters (frames received, dropped, consumed, "
 		"output, underruns, buffered; output rate, buffer size and rate "
@@ -1283,11 +1451,33 @@ MachineWindow::_HandleScripting(BMessage* message)
 				_InsertFloppy(path);
 		} else
 			reply.AddString("result", fSettings.machine.floppyImage.c_str());
+	} else if (strcmp(property, "CdRom") == 0) {
+		std::vector<int> drives = _CdDrives();
+		int32 id = form == B_INDEX_SPECIFIER ? specifier.GetInt32("index", -1)
+			: drives.empty() ? -1 : drives[0];
+		if (std::find(drives.begin(), drives.end(), id) == drives.end())
+			result = B_BAD_INDEX;
+		else if (set) {
+			const char* path;
+			BString error;
+			if (message->FindString("data", &path) != B_OK)
+				result = B_BAD_VALUE;
+			else if (path[0] == '\0')
+				_EjectCd(id);
+			else if (!_InsertCd(id, path, &error)) {
+				result = B_ERROR;
+				reply.AddString("message", error);
+			}
+		} else {
+			reply.AddString("result",
+				fSettings.machine.scsi[id].image.c_str());
+		}
 	} else
 		return false;
 	if (result != B_OK) {
 		reply.what = B_MESSAGE_NOT_UNDERSTOOD;
-		reply.AddString("message", strerror(result));
+		if (!reply.HasString("message"))
+			reply.AddString("message", strerror(result));
 	}
 	reply.AddInt32("error", result);
 	message->SendReply(&reply);
@@ -1309,6 +1499,7 @@ MachineWindow::_InsertFloppy(const char* path)
 			machine.Floppy()->InsertDisk(machine.FloppyUnit(),
 				std::move(image), writeProtected, error);
 	});
+	_MediaChanged();
 	_UpdateMenus();
 }
 
@@ -1440,7 +1631,107 @@ MachineWindow::_EjectFloppy()
 		if (machine.Floppy() != nullptr)
 			machine.Floppy()->EjectDisk(machine.FloppyUnit());
 	});
+	_MediaChanged();
 	_UpdateMenus();
+}
+
+
+std::vector<int>
+MachineWindow::_CdDrives() const
+{
+	std::vector<int> drives;
+	for (int id = 0; id < 7; id++) {
+		if (fSettings.machine.scsi[id].kind
+				== bebox::MachineConfig::ScsiTarget::kCdRom)
+			drives.push_back(id);
+	}
+	return drives;
+}
+
+
+void
+MachineWindow::_ShowCdPanel(int id)
+{
+	if (fCdPanel == nullptr) {
+		fCdPanel = new BFilePanel(B_OPEN_PANEL, new BMessenger(this),
+			nullptr, B_FILE_NODE, false);
+	}
+	BMessage message(kMsgCdChosen);
+	message.AddInt32("id", id);
+	fCdPanel->SetMessage(&message);
+	BWindow* window = fCdPanel->Window();
+	if (window->Lock()) {
+		BString title;
+		title.SetToFormat("%s: CD-ROM (SCSI ID %d)", kAppName, id);
+		window->SetTitle(title.String());
+		window->Unlock();
+	}
+	fCdPanel->Show();
+}
+
+
+bool
+MachineWindow::_InsertCd(int id, const char* path, BString* errorText)
+{
+	std::string error;
+	std::unique_ptr<bebox::CdImage> image = bebox::CdImage::Open(path,
+		error);
+	if (!image) {
+		BString text;
+		text.SetToFormat("The CD image could not be opened: %s",
+			error.c_str());
+		if (errorText != nullptr)
+			*errorText = text;
+		else
+			(new BAlert(kAppName, text.String(), "OK"))->Go(nullptr);
+		return false;
+	}
+	fSettings.machine.scsi[id].image = path;
+	_ChangeCd(id, std::move(image));
+	return true;
+}
+
+
+void
+MachineWindow::_EjectCd(int id)
+{
+	fSettings.machine.scsi[id].image.clear();
+	_ChangeCd(id, nullptr);
+}
+
+
+// Into the running machine: a disc already in comes out first, the new
+// one goes in a few seconds later (ScsiCd::Change()).
+void
+MachineWindow::_ChangeCd(int id, std::unique_ptr<bebox::CdImage> image)
+{
+	if (fPowered) {
+		// commands are copied: share the image
+		std::shared_ptr<std::unique_ptr<bebox::CdImage> > disc(
+			new std::unique_ptr<bebox::CdImage>(std::move(image)));
+		fEmulator.Post([id, disc](bebox::Machine& machine) {
+			if (bebox::ScsiCd* cd = machine.CdRom(id))
+				cd->Change(std::move(*disc));
+		});
+	}
+	_MediaChanged();
+	_UpdateMenus();
+}
+
+
+// Keeps an open preferences window's floppy and CD fields current.
+void
+MachineWindow::_MediaChanged()
+{
+	if (!fPrefsWindow.IsValid())
+		return;
+	BMessage message(kMsgMediaChanged);
+	message.AddString("floppy", fSettings.machine.floppyImage.c_str());
+	for (int id : _CdDrives()) {
+		message.AddInt32("id", id);
+		message.AddString("path", fSettings.machine.scsi[id].image.c_str());
+	}
+	fPrefsWindow.SendMessage(&message);
 }
 
 

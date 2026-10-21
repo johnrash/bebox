@@ -6,11 +6,11 @@ resource app_signature "application/x-vnd.BeBox-Emulator";
 resource app_flags B_SINGLE_LAUNCH;
 
 resource app_version {
-	major  = 0,
+	major  = 1,
 	middle = 1,
 	minor  = 0,
-	variety = B_APPV_DEVELOPMENT,
-	internal = 1,
+	variety = B_APPV_FINAL,
+	internal = 0,
 	short_info = "BeBox",
 	long_info = "An emulator of the Be BeBox (Dual603-66 and Dual603e-133)."
 };
