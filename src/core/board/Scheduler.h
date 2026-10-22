@@ -12,7 +12,6 @@
 #include "../Types.h"
 
 #include <functional>
-#include <queue>
 #include <vector>
 
 namespace bebox {
@@ -84,12 +83,14 @@ private:
 	};
 
 			void				_Push(Timer* timer);
+			void				_Remove(const Timer* timer);
+			void				_Pop();
 
 			u64					fNow;
 	static thread_local const Scheduler* sClockOwner;
 	static thread_local const u64* sClock;
-			std::priority_queue<Entry, std::vector<Entry>,
-				std::greater<Entry> > fQueue;
+			// a heap, the earliest entry first
+			std::vector<Entry>	fQueue;
 };
 
 }	// namespace bebox

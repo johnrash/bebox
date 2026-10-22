@@ -126,6 +126,7 @@ EmulatorThread::_Run()
 	u64 emulatedStart = machine.Now();
 	u64 nextLeds = machine.Now() + ledPeriod;
 	u64 nextSave = machine.Now() + savePeriod;
+	std::string saveError;
 	Clock::time_point statsTime = realStart;
 	u64 statsEmulated = machine.Now();
 	u64 statsInstructions = machine.InstructionCount();
@@ -208,7 +209,13 @@ EmulatorThread::_Run()
 		if (machine.Now() >= nextSave) {
 			nextSave += savePeriod;
 			std::string error;
-			machine.SavePersistentState(error);
+			// logged once until it works again or fails otherwise
+			if (machine.SavePersistentState(error))
+				saveError.clear();
+			else if (error != saveError) {
+				BB_LOG(kLogHost, kLogError, "%s", error.c_str());
+				saveError = error;
+			}
 		}
 
 		// Pacing: emulated time follows real time

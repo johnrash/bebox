@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -264,17 +265,23 @@ SharedFolder::_ScanFolder(const std::string& relative, BfsWriter::Node& node,
 				if (fd < 0)
 					return false;
 				size_t done = 0;
+				bool ok = true;
 				while (done < length) {
 					ssize_t got = pread(fd, (u8*)buffer + done, length - done,
 						(off_t)(offset + done));
+					if (got < 0 && errno == EINTR)
+						continue;
+					if (got < 0)
+						ok = false;
 					if (got <= 0)
 						break;
 					done += (size_t)got;
 				}
 				close(fd);
-				// a file that shrank meanwhile reads as zeros
+				// a file that shrank meanwhile reads as zeros (an error
+				// fails the volume: "cannot read NAME")
 				memset((u8*)buffer + done, 0, length - done);
-				return true;
+				return ok;
 			};
 		} else
 			continue;		// symbolic links and special files stay out
@@ -366,11 +373,14 @@ SharedFolder::_Build(std::string& error)
 }
 
 
+// Written next to the old one, then renamed: a snapshot is whole or the
+// old one.
 bool
 SharedFolder::_SaveSnapshot()
 {
 	std::string path = fImage + ".snapshot";
-	FILE* file = fopen(path.c_str(), "w");
+	std::string temporary = path + ".new";
+	FILE* file = fopen(temporary.c_str(), "w");
 	if (file == nullptr)
 		return false;
 	fprintf(file, "BeBox shared folder 1\t%s\n", Escape(fFolder).c_str());
@@ -383,7 +393,13 @@ SharedFolder::_SaveSnapshot()
 			(unsigned long long)record.bfsSize,
 			(unsigned long long)record.attributesHash);
 	}
-	return fclose(file) == 0;
+	bool ok = !ferror(file);
+	ok = fclose(file) == 0 && ok;
+	if (!ok || rename(temporary.c_str(), path.c_str()) != 0) {
+		unlink(temporary.c_str());
+		return false;
+	}
+	return true;
 }
 
 
@@ -514,20 +530,30 @@ SharedFolder::_Sync(DiskImage& volume, std::string& report,
 	int copied = 0;
 	int deleted = 0;
 	std::vector<std::string> conflicts;
+	// what could not be read from the volume or written to the folder
+	std::vector<std::string> failures;
+	auto failed = [&failures](const std::string& what, int code) {
+		failures.push_back(code != 0 ? what + ": " + strerror(code) : what);
+	};
 	std::vector<u8> buffer(1 << 20);
 
 	std::function<void(u64, const std::string&)> walk
 		= [&](u64 directory, const std::string& relative) {
 		BfsReader::RawEntries entries;
-		if (!reader.ListBlock(directory, entries))
+		if (!reader.ListBlock(directory, entries)) {
+			failed("cannot read the directory " + (relative.empty() ? "/"
+				: relative) + " on the volume", 0);
 			return;
+		}
 		for (const auto& item : entries) {
 			std::string childRelative = relative + "/" + item.first;
 			std::string host = fFolder + childRelative;
 			BfsReader::Stat stat;
 			std::vector<BfsAttribute> attributes;
-			if (!reader.StatInode(item.second, stat))
+			if (!reader.StatInode(item.second, stat)) {
+				failed("cannot read " + childRelative + " on the volume", 0);
 				continue;
+			}
 			reader.ReadAttributes(item.second, attributes);
 			u64 hash = HashAttributes(attributes);
 			seen.insert(childRelative);
@@ -536,11 +562,17 @@ SharedFolder::_Sync(DiskImage& volume, std::string& report,
 			bool hostExists = lstat(host.c_str(), &hostStat) == 0;
 			if (stat.directory) {
 				if (!hostExists) {
-					mkdir(host.c_str(), (stat.mode & 0777) | 0700);
+					if (mkdir(host.c_str(), (stat.mode & 0777) | 0700) != 0) {
+						failed(host, errno);
+						continue;
+					}
 					_WriteHostAttributes(host, attributes);
 				} else if (record == records.end()
 					|| record->second.attributesHash != hash)
 					_WriteHostAttributes(host, attributes);
+				Record& done = records[childRelative];
+				done.directory = true;
+				done.attributesHash = hash;
 				walk(item.second, childRelative);
 				// Tracker gives every volume a trash: leave it out while it
 				// is empty
@@ -555,8 +587,10 @@ SharedFolder::_Sync(DiskImage& volume, std::string& report,
 				|| record->second.bfsModified != stat.modified
 				|| record->second.bfsSize != stat.size;
 			if (!changed) {
-				if (record->second.attributesHash != hash)
+				if (record->second.attributesHash != hash) {
 					_WriteHostAttributes(host, attributes);
+					record->second.attributesHash = hash;
+				}
 				continue;
 			}
 			std::string target = host;
@@ -565,24 +599,42 @@ SharedFolder::_Sync(DiskImage& volume, std::string& report,
 					|| ModifiedNs(hostStat) != record->second.hostModified)) {
 				// changed on both sides: the host keeps its version
 				target = ConflictName(host);
-				conflicts.push_back(Leaf(target));
 			}
 			std::string temporary = target + ".bebox-sync";
 			int fd = open(temporary.c_str(), O_WRONLY | O_CREAT | O_TRUNC,
 				(stat.mode & 0777) | 0600);
-			if (fd < 0)
+			if (fd < 0) {
+				failed(target, errno);
 				continue;
-			bool ok = true;
-			for (u64 offset = 0; offset < stat.size && ok; ) {
+			}
+			bool readOk = true;
+			int writeError = 0;
+			for (u64 offset = 0; offset < stat.size; ) {
 				size_t length = (size_t)std::min<u64>(buffer.size(),
 					stat.size - offset);
-				ok = reader.ReadAt(item.second, offset, buffer.data(), length)
-					&& write(fd, buffer.data(), length) == (ssize_t)length;
+				if (!reader.ReadAt(item.second, offset, buffer.data(),
+						length)) {
+					readOk = false;
+					break;
+				}
+				ssize_t written = write(fd, buffer.data(), length);
+				if (written != (ssize_t)length) {
+					writeError = written < 0 ? errno : ENOSPC;
+					break;
+				}
 				offset += length;
 			}
-			ok = close(fd) == 0 && ok;
-			if (!ok || rename(temporary.c_str(), target.c_str()) != 0) {
+			if (close(fd) != 0 && writeError == 0)
+				writeError = errno;
+			if (readOk && writeError == 0
+				&& rename(temporary.c_str(), target.c_str()) != 0)
+				writeError = errno;
+			if (!readOk || writeError != 0) {
 				unlink(temporary.c_str());
+				if (!readOk)
+					failed("cannot read " + childRelative + " on the volume", 0);
+				else
+					failed(target, writeError);
 				continue;
 			}
 			struct timeval times[2];
@@ -592,6 +644,18 @@ SharedFolder::_Sync(DiskImage& volume, std::string& report,
 			utimes(target.c_str(), times);
 			_WriteHostAttributes(target, attributes);
 			copied++;
+			if (target != host)
+				conflicts.push_back(Leaf(target));
+			// as synced (a conflict leaves the host's file as it was)
+			Record& done = records[childRelative];
+			if (target == host && lstat(host.c_str(), &hostStat) == 0) {
+				done.hostSize = (u64)hostStat.st_size;
+				done.hostModified = ModifiedNs(hostStat);
+			}
+			done.directory = false;
+			done.bfsModified = stat.modified;
+			done.bfsSize = stat.size;
+			done.attributesHash = hash;
 		}
 	};
 	walk(reader.RootBlock(), "");
@@ -603,6 +667,24 @@ SharedFolder::_Sync(DiskImage& volume, std::string& report,
 	if (rootRecord != records.end()
 		&& rootRecord->second.attributesHash != HashAttributes(rootAttributes))
 		_WriteHostAttributes(fFolder, rootAttributes);
+
+	if (!failures.empty()) {
+		// No deletions: what was not seen may still be on the volume, and
+		// a file BeOS moved may not be at its new place yet. The volume
+		// stays (BeOS gets it back at the next power on); the snapshot
+		// takes what went to the folder, so that the next sync does not
+		// take it for a conflict.
+		fRecords.assign(records.begin(), records.end());
+		_SaveSnapshot();
+		error = "Not all of BeOS's changes to the shared folder " + fFolder
+			+ " could be made (" + failures[0];
+		if (failures.size() > 1)
+			error += ", and " + std::to_string(failures.size() - 1)
+				+ " more";
+		error += "). The volume is kept; the sync is tried again at the "
+			"next power on.";
+		return false;
+	}
 
 	// deleted in BeOS: files unchanged on the host since power on, then
 	// emptied directories (deepest first)

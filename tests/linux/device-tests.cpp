@@ -2,8 +2,9 @@
  * BeBox emulator - device tests: the game port A/D converter, the S3
  * Vision864's RAMDAC access, graphics engine and cursor, the Cirrus
  * GD5434's cursor, the NE2000, the SCSI CD-ROM's disc changes, the
- * boot ROM's debug output key, the MPC105's memory banks and the threaded
- * mode's choice of one host thread or two.
+ * boot ROM's debug output key, the MPC105's memory banks, the threaded
+ * mode's choice of one host thread or two and timers destroyed while
+ * armed.
  * Copyright 2026, the BeBox emulator authors. MIT License.
  */
 #include "core/board/BootItems.h"
@@ -31,6 +32,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <memory>
 #include <vector>
 
 #include <unistd.h>
@@ -852,6 +854,30 @@ TestMemoryBanks()
 }
 
 
+// A timer destroyed while armed takes its queue entries with it (the
+// scheduler keeps pointers; AddressSanitizer would see a stale one read).
+void
+TestTimerDestroyed()
+{
+	Scheduler scheduler;
+	int fired = 0;
+	int stayed = 0;
+	Timer staying(scheduler, [&stayed]() { stayed++; }, "staying");
+	staying.Arm(300);
+	{
+		std::unique_ptr<Timer> going(new Timer(scheduler,
+			[&fired]() { fired++; }, "going"));
+		going->Arm(100);
+		going->Arm(200);	// a stale entry too
+	}
+	Check(scheduler.NextEventTime() == 300,
+		"timers: a destroyed timer is not due");
+	scheduler.RunDue(1000);
+	Check(fired == 0 && stayed == 1,
+		"timers: the others still fire, the destroyed one does not");
+}
+
+
 // Threaded mode (ThreadGovernor): one host thread once the two wait for
 // each other longer than two are faster (the speedup a trial measured on
 // a calm host), probes of two threads backing off while they still wait.
@@ -933,6 +959,7 @@ main()
 	TestDebugKeyRelease();
 	TestMemoryBanks();
 	TestThreadGovernor();
+	TestTimerDestroyed();
 	printf("%d failures\n", sFailures);
 	return sFailures == 0 ? 0 : 1;
 }

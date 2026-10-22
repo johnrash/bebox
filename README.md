@@ -274,7 +274,9 @@ go back to the folder: new and changed files, attributes, deletions. A file
 changed on both sides meanwhile keeps the Haiku version, and BeOS's is saved
 next to it as "NAME (BeBox)". If BeOS did not shut down cleanly, the volume
 is kept and given back to BeOS at the next power on, so that it can repair
-it first. As the whole folder is copied at every power on, keep it small:
+it first. The same happens when a change cannot be made (a file the folder
+refuses, a damaged volume): BeBox says so, deletes nothing in the folder
+and tries again at the next power on. As the whole folder is copied at every power on, keep it small:
 the BeBox starts once the copy is done (the status line says so meanwhile,
 and the window stays usable), and quitting waits for BeOS's changes to be
 back in the folder.

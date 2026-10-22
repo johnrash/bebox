@@ -2,7 +2,8 @@
  * BeBox emulator - BFS writer tests: volumes written by BfsWriter are read
  * back with BfsReader (big directories with multi-level B+trees, nested
  * directories, small and attribute directory attributes, a file large
- * enough for indirect runs).
+ * enough for indirect runs); shared folders synced back, also from a
+ * damaged volume and to a folder that refuses writes.
  * Copyright 2026, the BeBox emulator authors. MIT License.
  *
  *   bfs-tests WORKDIR
@@ -269,6 +270,157 @@ TestSharedFolder(const std::string& work)
 		"volume and snapshot removed after the sync");
 }
 
+
+// Zeroes 'length' bytes of the shared volume: at the start of the inode of
+// 'path', or of its directory tree (B+tree header) with 'tree'.
+bool
+Damage(const std::string& image, const std::string& path, bool tree)
+{
+	std::string error;
+	std::unique_ptr<DiskImage> disk = DiskImage::Open(image, false, error);
+	if (!disk)
+		return false;
+	std::vector<u64> reads;
+	BfsReader reader([&disk, &reads](u64 offset, void* buffer,
+			size_t length) {
+		reads.push_back(offset);
+		return disk->Read(offset, buffer, length);
+	});
+	std::vector<u64> volumes = reader.FindVolumes(std::vector<u64>());
+	u64 block;
+	if (volumes.empty() || !reader.Mount(volumes[0])
+		|| !reader.LookupBlock(path, block, error))
+		return false;
+	// the inode is read first, then the tree header
+	reads.clear();
+	BfsReader::RawEntries entries;
+	BfsReader::Stat stat;
+	if (tree ? !reader.ListBlock(block, entries)
+			: !reader.StatInode(block, stat))
+		return false;
+	if (reads.size() < (tree ? 2u : 1u))
+		return false;
+	u64 offset = reads[tree ? 1 : 0];
+	const u8 zeros[4] = { 0, 0, 0, 0 };
+	return disk->Write(offset, zeros, sizeof(zeros));
+}
+
+
+// Syncing never deletes what it could not see on the volume, keeps the
+// volume when something failed, and does the rest at the next try without
+// taking its own copies for conflicts.
+void
+TestSharedFolderFailures(const std::string& work)
+{
+	std::string folder = work + "/failing";
+	std::string image = work + "/failing.qcow2";
+	auto fresh = [&](SharedFolder& share) {
+		system(("chmod -R u+w '" + folder + "' 2>/dev/null; rm -rf '"
+			+ folder + "' '" + image + "' '" + image + ".snapshot'").c_str());
+		mkdir(folder.c_str(), 0755);
+		mkdir((folder + "/sub").c_str(), 0755);
+		WriteText(folder + "/a.txt", "alpha");
+		WriteText(folder + "/keep.txt", "keep");
+		WriteText(folder + "/sub/b.txt", "bravo");
+		WriteText(folder + "/sub/c.txt", "charlie");
+		std::string report, error;
+		return share.Prepare(report, error);
+	};
+	std::string report, error;
+
+	// a directory BeOS left unchanged whose tree cannot be read
+	{
+		SharedFolder share(folder, image);
+		Check(fresh(share) && Damage(image, "/sub", true),
+			"sync failures: volume with an unreadable directory");
+		bool synced = share.Sync(report, error);
+		Check(!synced, "sync failures: unreadable directory fails ("
+			+ error + ")");
+		Check(ReadText(folder + "/sub/b.txt") == "bravo"
+			&& ReadText(folder + "/sub/c.txt") == "charlie",
+			"sync failures: its files stay on the host");
+		Check(Exists(image) && Exists(image + ".snapshot"),
+			"sync failures: volume and snapshot kept");
+	}
+	// a file whose inode cannot be read
+	{
+		SharedFolder share(folder, image);
+		Check(fresh(share) && Damage(image, "/sub/c.txt", false),
+			"sync failures: volume with an unreadable inode");
+		bool synced = share.Sync(report, error);
+		Check(!synced, "sync failures: unreadable inode fails (" + error
+			+ ")");
+		Check(ReadText(folder + "/sub/c.txt") == "charlie",
+			"sync failures: the file stays on the host");
+	}
+
+	// BeOS moved a.txt into sub, added sub/new.txt and changed keep.txt;
+	// sub on the host refuses writes
+	SharedFolder share(folder, image);
+	Check(fresh(share), "sync failures: folder shared");
+	BfsWriter::Node root;
+	root.directory = true;
+	root.name = "failing";
+	BfsWriter::Node sub;
+	sub.directory = true;
+	sub.name = "sub";
+	sub.children.push_back(TextNode("a.txt", "alpha"));
+	sub.children.push_back(TextNode("b.txt", "bravo"));
+	sub.children.push_back(TextNode("c.txt", "charlie"));
+	sub.children.push_back(TextNode("new.txt", "new"));
+	root.children.push_back(TextNode("keep.txt", "keep from BeOS"));
+	root.children.push_back(sub);
+	{
+		std::unique_ptr<DiskImage> disk = DiskImage::Open(image, false,
+			error);
+		Check(disk && BfsWriter::Write([&disk](u64 offset, const void* buffer,
+				size_t length) {
+				return disk->Write(offset, buffer, length);
+			}, disk->Size(), "failing", root, error),
+			"sync failures: volume changed");
+	}
+	chmod((folder + "/sub").c_str(), 0555);
+	if (access((folder + "/sub").c_str(), W_OK) == 0) {
+		printf("skip: sync failures with a read-only folder (running as "
+			"root)\n");
+		chmod((folder + "/sub").c_str(), 0755);
+		return;
+	}
+	bool synced = share.Sync(report, error);
+	Check(!synced, "sync failures: a file that cannot be written fails ("
+		+ error + ")");
+	Check(ReadText(folder + "/a.txt") == "alpha",
+		"sync failures: no deletions (the moved file stays)");
+	Check(ReadText(folder + "/keep.txt") == "keep from BeOS",
+		"sync failures: what could be written is");
+	Check(Exists(image) && Exists(image + ".snapshot"),
+		"sync failures: volume and snapshot kept");
+
+	// The next power on syncs the volume left behind (while it still
+	// fails, BeOS gets it back), then builds a new one.
+	SharedFolder again(folder, image);
+	error.clear();
+	Check(again.Prepare(report, error) && !report.empty() && Exists(image)
+		&& ReadText(folder + "/a.txt") == "alpha",
+		"sync failures: still failing, the volume goes back to BeOS");
+	chmod((folder + "/sub").c_str(), 0755);
+	error.clear();
+	bool prepared = again.Prepare(report, error);
+	Check(prepared, "sync failures: synced at the next power on"
+		+ (error.empty() ? std::string() : ": " + error));
+	printf("  report: %s\n", report.c_str());
+	Check(ReadText(folder + "/sub/a.txt") == "alpha"
+		&& ReadText(folder + "/sub/new.txt") == "new"
+		&& !Exists(folder + "/a.txt"),
+		"sync failures: the move done");
+	Check(!Exists(folder + "/keep.txt (BeBox)")
+		&& !Exists(folder + "/sub/b.txt (BeBox)"),
+		"sync failures: no conflict copies of what was synced before");
+	synced = again.Sync(report, error);
+	Check(synced && !Exists(image) && !Exists(image + ".snapshot"),
+		"sync failures: the new volume synced and removed");
+}
+
 }	// namespace
 
 
@@ -394,6 +546,7 @@ main(int argc, char** argv)
 	unlink(path.c_str());
 
 	TestSharedFolder(work);
+	TestSharedFolderFailures(work);
 
 	printf("%d failures\n", sFailures);
 	return sFailures == 0 ? 0 : 1;

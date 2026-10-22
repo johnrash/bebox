@@ -259,7 +259,15 @@ from a host folder at power on and records a snapshot of what it wrote;
 after a clean shutdown it reads the volume back with `BfsReader` and
 applies BeOS's changes to the folder (files whose BFS time or size differ,
 attribute hashes that differ, entries that disappeared), keeping a "NAME
-(BeBox)" copy when the host changed the same file. Attributes of numeric
+(BeBox)" copy when the host changed the same file. Anything it cannot
+read from the volume (a directory's tree, an inode, a file) or write to
+the folder (a directory, a file) leaves the deletions out (what was not
+seen may still exist, a moved file may not be at its new place yet) and
+keeps the volume; the snapshot then records what did go to the folder, so
+that the retry at the next power on does not take those files for
+conflicts. A host file that cannot be read while the volume is built fails
+the power on ("cannot read NAME"); one that shrank meanwhile reads as
+zeros. Attributes of numeric
 types are byte swapped between the little endian host and the big endian
 volume. The front ends supply the host's attributes (`HostAttributes`:
 `HaikuAttributes` on Haiku). The Haiku app copies the folders on a thread of
