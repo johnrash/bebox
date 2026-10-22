@@ -3,12 +3,13 @@
  * Vision864's RAMDAC access, graphics engine and cursor, the Cirrus
  * GD5434's cursor, the NE2000, the SCSI CD-ROM's disc changes, the
  * boot ROM's debug output key, the MPC105's memory banks, the threaded
- * mode's choice of one host thread or two and timers destroyed while
- * armed.
+ * mode's choice of one host thread or two, timers destroyed while armed,
+ * disk image write errors and the log's settings.
  * Copyright 2026, the BeBox emulator authors. MIT License.
  */
 #include "core/board/BootItems.h"
 #include "core/board/Scheduler.h"
+#include "core/Log.h"
 #include "core/board/ThreadGovernor.h"
 #include "core/bus/IoSpace.h"
 #include "core/bus/Mpc105.h"
@@ -854,6 +855,88 @@ TestMemoryBanks()
 }
 
 
+// A disk image whose writes fail while 'failing' is set.
+class FailingImage : public DiskImage {
+public:
+	virtual u64 Size() const { return 1 << 20; }
+	virtual bool IsReadOnly() const { return false; }
+	virtual bool Read(u64 offset, void* buffer, size_t length)
+		{ memset(buffer, 0, length); return true; }
+	virtual bool Write(u64 offset, const void* buffer, size_t length)
+		{ return !failing; }
+	virtual std::string Path() const { return "/failing.img"; }
+	virtual const char* Format() const { return "raw"; }
+
+	bool failing = true;
+};
+
+
+std::vector<std::string> sStorageErrors;
+
+void
+StorageErrorSink(LogCategory category, LogLevel level, const char* message,
+	void*)
+{
+	if (category == kLogStorage && level == kLogError)
+		sStorageErrors.push_back(message);
+}
+
+
+// A SCSI disk image that cannot be written: BeOS gets a medium error, the
+// log (shown by the app) one error until a write works again.
+void
+TestDiskWriteErrors()
+{
+	FailingImage* image = new FailingImage;
+	ScsiDisk disk(std::unique_ptr<DiskImage>(image), "BeBox", "Disk");
+	disk.Reset();
+	RunScsi(disk, { 0x00, 0, 0, 0, 0, 0 });		// the unit attention
+	ScsiSense(disk);
+	auto write = [&disk]() {
+		ScsiCommand command;
+		memset(command.cdb, 0, sizeof(command.cdb));
+		u8 cdb[10] = { 0x2a, 0, 0, 0, 0, 8, 0, 0, 1, 0 };	// WRITE(10)
+		memcpy(command.cdb, cdb, sizeof(cdb));
+		command.cdbLength = 10;
+		disk.Execute(command);
+		if (command.status != kScsiStatusGood
+			|| command.dataOutLength != 512)
+			return (u8)0xff;
+		disk.DataOut(command, std::vector<u8>(512, 0x55));
+		return command.status;
+	};
+	sStorageErrors.clear();
+	Log::SetSink(StorageErrorSink, nullptr);
+	bool failed = write() == kScsiStatusCheckCondition
+		&& ScsiSense(disk) == 0x30c;
+	write();
+	Check(failed && sStorageErrors.size() == 1
+		&& sStorageErrors[0].find("/failing.img") != std::string::npos,
+		"disk write errors: medium error, logged once");
+	image->failing = false;
+	bool works = write() == kScsiStatusGood;
+	image->failing = true;
+	write();
+	Check(works && sStorageErrors.size() == 2,
+		"disk write errors: logged again after a write worked");
+	Log::SetSink(nullptr, nullptr);
+}
+
+
+// "CATEGORY=LEVEL" settings (the app's and bebox-headless' --log).
+void
+TestLogConfigure()
+{
+	Check(Log::Configure("scsi=info") && Log::Level(kLogScsi) == kLogInfo
+		&& Log::Level(kLogIde) == kLogWarning, "log: a category's level");
+	Check(Log::Configure("ide") && Log::Level(kLogIde) == kLogDebug,
+		"log: debug without a level");
+	Check(!Log::Configure("nonsense=debug"), "log: unknown category");
+	Check(Log::Configure("all=warning") && Log::Level(kLogScsi) == kLogWarning
+		&& Log::Level(kLogIde) == kLogWarning, "log: all categories");
+}
+
+
 // A timer destroyed while armed takes its queue entries with it (the
 // scheduler keeps pointers; AddressSanitizer would see a stale one read).
 void
@@ -960,6 +1043,8 @@ main()
 	TestMemoryBanks();
 	TestThreadGovernor();
 	TestTimerDestroyed();
+	TestDiskWriteErrors();
+	TestLogConfigure();
 	printf("%d failures\n", sFailures);
 	return sFailures == 0 ? 0 : 1;
 }

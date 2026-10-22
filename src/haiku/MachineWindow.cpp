@@ -85,7 +85,8 @@ MachineWindow::MachineWindow(Settings& settings)
 	fCdPanel(nullptr),
 	fModifiers(0),
 	fPowered(false),
-	fJoystickRunner(nullptr)
+	fJoystickRunner(nullptr),
+	fProblemTime(0)
 {
 	memset(fKeysDown, 0, sizeof(fKeysDown));
 	for (int i = 0; i < 4; i++)
@@ -148,6 +149,9 @@ MachineWindow::MachineWindow(Settings& settings)
 	BMessage tick(kMsgTick);
 	new BMessageRunner(BMessenger(this), &tick, 50000);
 	_UpdateMenus();
+
+	fLogTarget = BMessenger(this);
+	bebox::Log::SetSink(&MachineWindow::_LogSink, &fLogTarget);
 }
 
 
@@ -157,6 +161,7 @@ MachineWindow::~MachineWindow()
 	fEmulator.Stop();
 	fNetwork.reset();
 	_SyncSharedFolders(false);
+	bebox::Log::SetSink(nullptr, nullptr);
 	_ReplyToStart(B_CANCELED);
 	fSerialBackends.clear();
 	for (int i = 0; i < 4; i++) {
@@ -292,9 +297,12 @@ MachineWindow::_NewProfile(const char* name)
 		std::string nvram = fSettings.NvramPath().String();
 		fEmulator.Post([flash, nvram](bebox::Machine& machine) {
 			std::string error;
-			machine.SavePersistentState(error);		// to the old profile
+			// to the old profile, then to the new one
+			if (!machine.SavePersistentState(error))
+				BB_LOG(kLogHost, kLogError, "%s", error.c_str());
 			machine.SetPersistentPaths(flash, nvram);
-			machine.SavePersistentState(error);
+			if (!machine.SavePersistentState(error))
+				BB_LOG(kLogHost, kLogError, "%s", error.c_str());
 		});
 	}
 	_ApplySettings();
@@ -491,6 +499,7 @@ MachineWindow::PowerOn()
 	// what was posted while the machine was off: it starts from the
 	// settings
 	fEmulator.DiscardCommands();
+	fProblemsAlerted.clear();
 	bebox::MachineConfig config = fSettings.MachineConfigForRun();
 	for (const bebox::MachineConfig::ScsiTarget& target : config.scsi) {
 		if (target.kind == bebox::MachineConfig::ScsiTarget::kSharedFolder) {
@@ -686,9 +695,45 @@ MachineWindow::_UpdateLeds()
 }
 
 
+// Any thread: errors of the storage and the host (a disk image, the flash
+// or NVRAM file that cannot be written) are shown in the window too. The
+// core logs each problem once until it goes away.
+void
+MachineWindow::_LogSink(bebox::LogCategory category, bebox::LogLevel level,
+	const char* message, void* cookie)
+{
+	bebox::Log::DefaultSink(category, level, message, nullptr);
+	if (level == bebox::kLogError && (category == bebox::kLogStorage
+			|| category == bebox::kLogHost)) {
+		BMessage problem(kMsgProblem);
+		problem.AddString("text", message);
+		((BMessenger*)cookie)->SendMessage(&problem);
+	}
+}
+
+
+// In the status line for 30 s, in an alert the first time since power on.
+void
+MachineWindow::_ShowProblem(const char* text)
+{
+	fProblem = text;
+	fProblemTime = system_time();
+	_UpdateStatus();
+	if (!fProblemsAlerted.insert(text).second)
+		return;
+	// the first letter up (Capitalize() would lower the path's)
+	BString alert;
+	alert << (char)toupper((unsigned char)text[0]) << text + 1 << ".";
+	(new BAlert(kAppName, alert.String(), "OK", nullptr, nullptr,
+		B_WIDTH_AS_USUAL, B_WARNING_ALERT))->Go(nullptr);
+}
+
+
 void
 MachineWindow::_UpdateStatus()
 {
+	bool problem = !fProblem.IsEmpty()
+		&& system_time() - fProblemTime < 30000000;
 	BString text;
 	if (fStarting) {
 		text.SetToFormat("%s  \xe2\x80\x94  starting: copying the shared "
@@ -715,13 +760,17 @@ MachineWindow::_UpdateStatus()
 		if (status.paused)
 			text << "  (paused)";
 		const char* hostKey = kHostKeyNames[_HostKeyIndex()];
-		if (fScreen->IsMouseCaptured())
+		if (problem)
+			;	// instead of the mouse hint
+		else if (fScreen->IsMouseCaptured())
 			text << "  \xe2\x80\x94  " << hostKey << " releases the mouse";
 		else if (fSettings.captureOnClick)
 			text << "  \xe2\x80\x94  click the screen to capture the mouse";
 		else
 			text << "  \xe2\x80\x94  " << hostKey << " captures the mouse";
 	}
+	if (problem)
+		text << "  \xe2\x80\x94  " << fProblem;
 	if (text != fStatus->Text())
 		fStatus->SetText(text.String());
 
@@ -1087,6 +1136,13 @@ MachineWindow::MessageReceived(BMessage* message)
 		case kMsgTick:
 			_UpdateStatus();
 			break;
+		case kMsgProblem:
+		{
+			const char* text;
+			if (message->FindString("text", &text) == B_OK)
+				_ShowProblem(text);
+			break;
+		}
 		case kMsgJoystickPoll:
 			_PollJoysticks();
 			break;
@@ -1535,6 +1591,10 @@ static property_info kProperties[] = {
 		{ B_DIRECT_SPECIFIER, B_INDEX_SPECIFIER, 0 },
 		"The disc image in the CD-ROM drive on a SCSI ID (or in the first "
 		"drive); set \"\" to eject.", 0, { B_STRING_TYPE } },
+	{ "Problem", { B_GET_PROPERTY, 0 }, { B_DIRECT_SPECIFIER, 0 },
+		"The latest problem with the computer's storage (a disk image or a "
+		"profile file that cannot be written), empty if none.", 0,
+		{ B_STRING_TYPE } },
 	{ "AudioStats", { B_GET_PROPERTY, 0 }, { B_DIRECT_SPECIFIER, 0 },
 		"Sound output counters (frames received, dropped, consumed, "
 		"output, underruns, buffered; output rate, buffer size and rate "
@@ -1644,6 +1704,8 @@ MachineWindow::_HandleScripting(BMessage* message)
 		Settings::GetProfiles(names);
 		for (int32 i = 0; i < names.CountStrings(); i++)
 			reply.AddString("result", names.StringAt(i));
+	} else if (strcmp(property, "Problem") == 0 && !set) {
+		reply.AddString("result", fProblem);
 	} else if (strcmp(property, "AudioStats") == 0 && !set) {
 		HaikuAudio::Stats stats = fAudio.GetStats();
 		BString text;

@@ -370,19 +370,6 @@ Usage()
 		"  --shots PREFIX      save a PNG every second (PREFIX-N.png)\n");
 }
 
-
-LogLevel
-ParseLevel(const char* name)
-{
-	static const char* const kNames[] = { "error", "warning", "info",
-		"debug", "trace" };
-	for (int i = 0; i < 5; i++) {
-		if (strcmp(name, kNames[i]) == 0)
-			return (LogLevel)i;
-	}
-	return kLogWarning;
-}
-
 }	// namespace
 
 
@@ -580,18 +567,9 @@ main(int argc, char** argv)
 		else if (arg.compare(0, 8, "--serial") == 0 && arg.size() == 9)
 			serial[arg[8] - '1'] = next();
 		else if (arg == "--log") {
-			std::string value = next();
-			size_t equal = value.find('=');
-			std::string name = value.substr(0, equal);
-			LogLevel level = ParseLevel(equal == std::string::npos ? "debug"
-				: value.substr(equal + 1).c_str());
-			LogCategory category;
-			if (name == "all")
-				Log::SetAllLevels(level);
-			else if (Log::CategoryFromName(name.c_str(), category))
-				Log::SetLevel(category, level);
-			else
-				fprintf(stderr, "unknown log category %s\n", name.c_str());
+			const char* value = next();
+			if (!Log::Configure(value))
+				fprintf(stderr, "unknown log category in %s\n", value);
 		} else if (arg == "--trace")
 			traceCount = strtoull(next(), nullptr, 0);
 		else if (arg == "--trace-from")

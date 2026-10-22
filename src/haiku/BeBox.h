@@ -49,7 +49,8 @@ enum {
 	kMsgNewDiskCreated = 'ndcr',
 	kMsgResetFlash = 'rsfl',
 	kMsgClearNvram = 'clnv',
-	kMsgSerialConsole = 'scon'
+	kMsgSerialConsole = 'scon',
+	kMsgProblem = 'prob'
 };
 
 enum LedStyle {

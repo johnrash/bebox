@@ -59,6 +59,7 @@ private:
 	struct Drive {
 		std::unique_ptr<DiskImage> image;
 		bool writeProtected = false;
+		bool writeFailing = false;	// logged once until it works
 		int cylinders = 80;
 		int heads = 2;
 		int sectors = 18;
@@ -78,6 +79,8 @@ private:
 			void				_StartCommand();
 			void				_ExecuteTransfer();
 			void				_FinishTransfer(u8 st0, u8 st1, u8 st2);
+			bool				_WriteSector(Drive& d, u64 lba,
+									const u8* data);
 			void				_Result(std::initializer_list<u8> bytes,
 									bool irq);
 			int					_CommandLength(u8 command) const;

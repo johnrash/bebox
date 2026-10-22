@@ -14,6 +14,7 @@
  * that profile.
  */
 #include "BeBox.h"
+#include "core/Log.h"
 #include "MachineWindow.h"
 #include "Settings.h"
 
@@ -59,7 +60,12 @@ public:
 				break;
 			if (strcmp(arg, "--profile") == 0)
 				;	// done first
-			else if (strcmp(arg, "--rom-dir") == 0)
+			else if (strcmp(arg, "--log") == 0) {
+				if (!bebox::Log::Configure(value)) {
+					fprintf(stderr, "BeBox: unknown log category in %s\n",
+						value);
+				}
+			} else if (strcmp(arg, "--rom-dir") == 0)
 				fSettings.romDirectory = value;
 			else if (strcmp(arg, "--boot-rom") == 0)
 				fSettings.bootRomImage = value;

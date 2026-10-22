@@ -29,6 +29,7 @@
 #include "HaikuAudio.h"
 #include "JobQueue.h"
 #include "Settings.h"
+#include "core/Log.h"
 #include "core/host/EmulatorThread.h"
 #include "core/host/NetworkBackend.h"
 #include "core/host/SerialBackend.h"
@@ -37,6 +38,8 @@
 #include <String.h>
 
 #include <memory>
+#include <set>
+#include <string>
 #include <vector>
 
 #include <Window.h>
@@ -104,6 +107,12 @@ private:
 			void				_SendKey(uint32 haikuKey, bool down);
 			void				_ReleaseAllKeys();
 			void				_UpdateStatus();
+			// The core's log: storage and persistence errors go to the
+			// window (_ShowProblem()), besides the standard error.
+	static	void				_LogSink(bebox::LogCategory category,
+									bebox::LogLevel level,
+									const char* message, void* cookie);
+			void				_ShowProblem(const char* text);
 			bool				_ShowLeds() const;
 			bool				_UpdateLeds();
 			void				_UpdateMenus();
@@ -202,6 +211,12 @@ private:
 			bool				fPowered;
 			BJoystick*			fJoysticks[4];
 			BMessageRunner*		fJoystickRunner;
+			BMessenger			fLogTarget;		// this window, for _LogSink
+			// the latest problem (in the status line for a while), the
+			// ones shown in an alert since the machine was powered on
+			BString				fProblem;
+			bigtime_t			fProblemTime;
+			std::set<std::string> fProblemsAlerted;
 };
 
 #endif	// BEBOX_MACHINE_WINDOW_H

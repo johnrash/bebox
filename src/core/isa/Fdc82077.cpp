@@ -15,7 +15,7 @@ enum {
 	kSt0AbnormalTermination = 0x40, kSt0Invalid = 0x80,
 	kSt0SeekEnd = 0x20, kSt0Equipment = 0x10, kSt0NotReady = 0x08,
 	kSt1MissingAddressMark = 0x01, kSt1NotWritable = 0x02,
-	kSt1NoData = 0x04, kSt1EndOfCylinder = 0x80
+	kSt1NoData = 0x04, kSt1DataError = 0x20, kSt1EndOfCylinder = 0x80
 };
 
 static const u32 kSectorSize = 512;
@@ -466,7 +466,11 @@ Fdc82077::_ExecuteTransfer()
 			u64 lba = ((u64)fXferCylinder * d.heads + fXferHead) * d.sectors
 				+ sector - 1;
 			std::vector<u8> data(kSectorSize, fill);
-			d.image->Write(lba * kSectorSize, data.data(), kSectorSize);
+			if (!_WriteSector(d, lba, data.data())) {
+				_FinishTransfer(st0 | kSt0AbnormalTermination, kSt1DataError,
+					0);
+				return;
+			}
 		}
 		_FinishTransfer(st0, 0, 0);
 		return;
@@ -503,7 +507,11 @@ Fdc82077::_ExecuteTransfer()
 				_FinishTransfer(st0 | kSt0AbnormalTermination, 0x10, 0);
 				return;
 			}
-			d.image->Write(lba * kSectorSize, buffer, kSectorSize);
+			if (!_WriteSector(d, lba, buffer)) {
+				_FinishTransfer(st0 | kSt0AbnormalTermination, kSt1DataError,
+					0);
+				return;
+			}
 		} else {
 			d.image->Read(lba * kSectorSize, buffer, kSectorSize);
 			if (!verify) {
@@ -539,6 +547,24 @@ Fdc82077::_ExecuteTransfer()
 	}
 	fTimerAction = [this, st0]() { _FinishTransfer(st0, 0, 0); };
 	fTimer->ArmIn(_Ms(2) * sectorsMoved);
+}
+
+
+// A sector to the image; a failure is the guest's write error (a data
+// error), logged once until a write works again.
+bool
+Fdc82077::_WriteSector(Drive& d, u64 lba, const u8* data)
+{
+	if (d.image->Write(lba * kSectorSize, data, kSectorSize)) {
+		d.writeFailing = false;
+		return true;
+	}
+	if (!d.writeFailing) {
+		BB_LOG(kLogStorage, kLogError, "cannot write to the floppy image %s: "
+			"BeOS gets a write error", d.image->Path().c_str());
+	}
+	d.writeFailing = true;
+	return false;
 }
 
 

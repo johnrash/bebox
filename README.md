@@ -216,6 +216,9 @@ half as long on the 133 MHz one.
   sticks (two per game port, as with Y cables).
 - The status line shows the floppy, CD and hard disk (with the disk
   activity); click the floppy or the CD to insert one.
+- When a disk image cannot be written (a full disk, say; BeOS then gets a
+  write error) or the profile's flash and NVRAM cannot be saved, BeBox
+  says so in an alert and for a while in the status line.
 - **Media** inserts and ejects floppies and CDs while the machine runs
   (for a CD, give a SCSI ID a CD-ROM drive in **Preferences > Storage**;
   it may be left empty). BeOS mounts a CD by itself a few seconds after
@@ -328,7 +331,8 @@ hey BeBox shot of Window BeBox with path=/tmp/screen.png
 
 `CdRom` is the first CD-ROM drive, `CdRom 3` the one on SCSI ID 3.
 Also `get Mips`, `get EmulatedTime`, `get DiskLed`, `get AudioStats` (the
-sound output's counters: underruns are gaps), `get Profiles`, `get Profile`
+sound output's counters: underruns are gaps), `get Problem` (the latest
+storage problem, empty if none), `get Profiles`, `get Profile`
 and `set Profile` (switches, restarting a running machine), and the
 commands
 `pwon`, `pwof`, `rset` and `cadl` (Ctrl+Alt+Delete). Replies come after the
@@ -340,11 +344,14 @@ action.
 [--model 66|133|hobbit] [--kernel FILE] [--ram MB] [--video s3|cirrus]
 [--scsiN-disk FILE]
 [--scsiN-cd FILE] [--scsiN-share FOLDER] [--ide0 FILE] [--floppy FILE]
-[--net] [--net-forward SPEC] [--power-on]` sets up the machine (the
-settings are kept; an empty FILE removes the device, or leaves the CD-ROM
-drive empty). `--profile` switches to a profile first, making it as a
-copy of the current one if there is none; the other options change that
-profile.
+[--net] [--net-forward SPEC] [--power-on] [--log CATEGORY=LEVEL]` sets up
+the machine (the settings are kept; an empty FILE removes the device, or
+leaves the CD-ROM drive empty). `--profile` switches to a profile first,
+making it as a copy of the current one if there is none; the other options
+change that profile. `--log` writes the emulator's messages of a category
+(`scsi`, `machine`, ... or `all`) from that level on (`error`, `warning`,
+`info`, `debug`, `trace`) to the standard error, for a start from
+Terminal.
 
 `bebox-headless` runs a machine without a window, for tests and debugging:
 serial ports to files or TCP, scripted keys and mouse clicks, screenshots,

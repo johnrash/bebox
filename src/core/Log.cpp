@@ -6,6 +6,8 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
+#include <string>
 #include <strings.h>
 
 namespace bebox {
@@ -16,8 +18,9 @@ static const char* const kCategoryNames[kLogCategoryCount] = {
 	"audio", "joystick", "storage", "machine", "host"
 };
 
-static void
-DefaultSink(LogCategory category, LogLevel level, const char* message, void*)
+void
+Log::DefaultSink(LogCategory category, LogLevel level, const char* message,
+	void*)
 {
 	static const char* const kLevels[] = { "E", "W", "I", "D", "T" };
 	fprintf(stderr, "[%s %s] %s\n", kLevels[level], kCategoryNames[category],
@@ -87,6 +90,29 @@ Log::CategoryFromName(const char* name, LogCategory& category)
 		}
 	}
 	return false;
+}
+
+
+bool
+Log::Configure(const char* spec)
+{
+	static const char* const kLevelNames[] = { "error", "warning", "info",
+		"debug", "trace" };
+	const char* equal = strchr(spec, '=');
+	std::string name(spec, equal != nullptr ? equal - spec : strlen(spec));
+	LogLevel level = equal != nullptr ? kLogWarning : kLogDebug;
+	for (int i = 0; equal != nullptr && i < 5; i++) {
+		if (strcmp(equal + 1, kLevelNames[i]) == 0)
+			level = (LogLevel)i;
+	}
+	LogCategory category;
+	if (name == "all")
+		SetAllLevels(level);
+	else if (CategoryFromName(name.c_str(), category))
+		SetLevel(category, level);
+	else
+		return false;
+	return true;
 }
 
 }	// namespace bebox

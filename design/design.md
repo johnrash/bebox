@@ -287,7 +287,13 @@ for the queue.
   instead of letting it run dry or overflow. Keyboard input is taken in `DispatchMessage()` (so window
   shortcuts don't eat keys) and mapped to scan code set 2; the mouse is
   captured on click and released with right Control. Scripting (`hey`) is
-  implemented here.
+  implemented here. Its log sink (`Log::SetSink()`, any thread) passes
+  everything to the standard error and errors of the `storage` and `host`
+  categories to the window: a disk image that cannot be written (the
+  SCSI, IDE and floppy devices log that once until a write works again)
+  or flash and NVRAM that cannot be saved show in an alert (once per power
+  on) and in the status line for 30 s (`hey get Problem`). `--log
+  CATEGORY=LEVEL` sets levels (`Log::Configure()`, also bebox-headless').
 - `PrefsWindow`: a sidebar of sections with Haiku's own preference icons
   (Machine: the virtual memory icon with the "Be" overlay, merged into one
   HVIF by `tools/merge_hvif.py`; ROM & NVRAM, Display, Storage, Sound,
