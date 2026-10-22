@@ -140,7 +140,8 @@ public:
 		about->AddCopyright(2026, "The BeBox emulator authors");
 		// one block: no blank line between the two
 		about->AddText("Distributed under the terms of the MIT License.\n"
-			"BeBox icon by zuMi, used under the MIT License.");
+			"The BeBox application icon is by zuMi, the preferences icons "
+			"are from Haiku's icon set, both under the MIT license.");
 		about->Show();
 	}
 

@@ -1,5 +1,5 @@
 name			bebox
-version			1.1-16
+version			1.1-17
 architecture	x86_64
 summary			"Emulator of the Be BeBox (Dual603-66, Dual603e-133 and the Hobbit prototype)"
 description		"BeBox emulates Be Inc.'s dual PowerPC BeBox well enough to run BeOS for PowerPC from Developer Release 6 to R5.0.3: both processors, the boot ROM and its flash, video (Number Nine GXE64 S3 Vision864 or Cirrus Logic CL-GD5434), sound, keyboard and mouse, the front panel LEDs, game ports, SCSI, IDE, floppy, CD-ROM, four serial ports and an NE2000 Ethernet card on a private network (NAT). Disks are raw or thin provisioned QCOW2 images, and a Haiku folder can be shared with BeOS as a disk. Machine profiles keep several setups (release, model, disks) to switch between. It also runs the 1993-94 Hobbit prototype (two AT&T 92010 processors, a Trident video card on the BeBus) from its own disk images, without a boot ROM. The BeBox boot ROMs are not included: you need images of your own."

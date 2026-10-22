@@ -206,16 +206,17 @@ PrefsWindow::PrefsWindow(Settings& settings, BMessenger target)
 	title.SetToFormat("BeBox preferences: %s", fSettings.profile.String());
 	SetTitle(title.String());
 
-	_AddSection("Machine", "rsrc:machine|application/x-vnd.Haiku-About",
+	_AddSection("Machine", "rsrc:BEOS:ICON|application/x-vnd.Haiku-About",
 		_MachinePage());
-	_AddSection("ROM & NVRAM", "application/x-vnd.Haiku-Devices",
+	_AddSection("ROM & NVRAM", "rsrc:machine|application/x-vnd.Haiku-Devices",
 		_RomPage());
 	_AddSection("Display", "application/x-vnd.Haiku-Screen", _DisplayPage());
 	_AddSection("Storage", "application/x-vnd.Haiku-DriveSetup",
 		_StoragePage());
-	_AddSection("Sound", "application/x-vnd.Haiku-Media", _SoundPage());
-	_AddSection("Keyboard & mouse", "application/x-vnd.Haiku-Input"
-		"|application/x-vnd.Haiku-Mouse", _InputPage());
+	_AddSection("Sound", "rsrc:speaker|application/x-vnd.Haiku-Media",
+		_SoundPage());
+	_AddSection("Keyboard & mouse", "rsrc:mouse|application/x-vnd.Haiku-Input",
+		_InputPage());
 	_AddSection("Game ports", "application/x-vnd.Haiku-Joysticks"
 		"|rsrc:joystick", _GamePortsPage());
 	_AddSection("Network", "application/x-vnd.Haiku-Network", _NetworkPage());

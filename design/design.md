@@ -364,9 +364,11 @@ for the queue.
   on) and in the status line for 30 s (`hey get Problem`). `--log
   CATEGORY=LEVEL` sets levels (`Log::Configure()`, also bebox-headless').
 - `PrefsWindow`: a sidebar of sections with Haiku's own preference icons
-  (Machine: the virtual memory icon with the "Be" overlay, merged into one
-  HVIF by `tools/merge_hvif.py`; ROM & NVRAM, Display, Storage, Sound,
-  Keyboard & mouse, Game ports, Network, Serial ports, Advanced) editing
+  (Machine: the BeBox application icon; ROM & NVRAM: the virtual memory
+  icon with the "Be" overlay, merged into one HVIF by
+  `tools/merge_hvif.py`; Sound: the speaker box; Keyboard & mouse: the
+  Mouse preferences' icon; Display, Storage, Game ports, Network, Serial
+  ports, Advanced) editing
   the current profile. The file panels for disk slots get a "New disk
   image" button (added next to the panel's Cancel button) that opens
   `NewDiskWindow` on the panel's folder.
