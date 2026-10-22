@@ -76,7 +76,11 @@ takes:
 Both processors busy (DR6, or BeOS at work), threaded mode is 1.7-1.8
 times as fast; `THREADS=1 tests/boot-regression.sh` boots every case so,
 and `cpu-unit-tests` counts 200000 `lwarx`/`stwcx.` increments from two
-threads.
+threads. `tests/tsan.sh` runs that test and a threaded R4.5 boot under
+ThreadSanitizer (`make TSAN=1`): its only reports are races on guest
+memory (both CPUs touching the same words, as the guest's own code does
+on a real BeBox), which it counts and accepts; a race anywhere else fails
+it.
 
 That holds while both threads have a core of their own. When other work
 keeps the host's cores busy, the scheduler takes one of the threads off
@@ -233,7 +237,16 @@ engine with an empty FIFO.
 
 `DiskImage` is the interface for raw and QCOW2 images (versions 2 and 3:
 L1/L2 tables, refcounts with table growth, compressed clusters read only,
-backing files for overlays). `CdImage` reads ISO, Toast and BIN/CUE
+backing files for overlays). A QCOW2 write that allocates writes the new
+cluster (data, an L2 table, a reference count block) at the end of the
+file, counts it, enters it into the table that refers to it on disk and
+then in memory, and releases what it replaces last, as QEMU does; growing
+the reference count table switches the header last. So a write that fails
+(a full disk) leaves the image consistent, as opened and reopened: the
+cluster that could not be written is cut off the file again, and a table
+that could not grow is undone. `qcow2-tests` fills the disk (a file size
+limit) at random points with 512 byte clusters, where every kind of
+allocation meets it. `CdImage` reads ISO, Toast and BIN/CUE
 (2048 and 2352 byte sectors, audio tracks). `BfsReader` reads files and
 directories from BFS volumes (big and little endian; Apple partition maps
 and CD tracks) for extracting boot ROM images.

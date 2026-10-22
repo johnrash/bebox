@@ -369,8 +369,10 @@ The emulator core is portable C++17 and is tested on Linux:
 
 - `make -C tests/linux check`: processor tests (against `qemu-ppc` as an
   oracle), Hobbit processor tests, multiprocessor and device tests, QCOW2
-  tests (against `qemu-img`), under AddressSanitizer and
-  UndefinedBehaviorSanitizer.
+  tests (against `qemu-img`, also on a full disk), under AddressSanitizer
+  and UndefinedBehaviorSanitizer.
+- `tests/tsan.sh`: the threaded mode under ThreadSanitizer (the
+  multiprocessor test and an R4.5 boot).
 - `tests/boot-regression.sh`: boots each BeOS release headless (the media
   and installed disks go in `work/`) and the Hobbit disks (in `Hobbit/`),
   through throwaway overlays.

@@ -10,6 +10,10 @@
  * encryption, external data files, extended L2 entries, zstd compression
  * and writing images with internal snapshots' shared clusters is done by
  * copying (the old cluster's reference count drops).
+ *
+ * A write that fails (a full disk) leaves the image consistent: new
+ * clusters are written at the end of the file and counted before anything
+ * refers to them, on disk before in memory (see _WriteCluster()).
  */
 #ifndef BEBOX_QCOW2_IMAGE_H
 #define BEBOX_QCOW2_IMAGE_H
@@ -78,7 +82,9 @@ private:
 									const u8* buffer, u32 length);
 
 			// allocation and reference counts
-			u64					_AllocateCluster();
+			bool				_Append(const u8* cluster, u64& offset);
+			void				_Unappend(u64 offset);
+			void				_Release(u64 cluster);
 			bool				_GetRefcount(u64 cluster, u64& refcount);
 			bool				_SetRefcount(u64 cluster, u64 refcount);
 			bool				_GrowRefcountTable(u64 neededIndex);
