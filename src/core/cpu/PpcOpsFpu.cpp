@@ -236,6 +236,48 @@ SignificantBits(u64 bits)
 }
 
 
+// The fused multiply-add for single precision: x * z + y rounded to odd
+// (toward zero, the last bit set when that was inexact), so that rounding
+// it to single is the one rounding the PowerPC does (53 bits are more than
+// 24 + 1), in every rounding mode. An exact zero gets its sign from the
+// current rounding mode. The host's flags must be clear; they stay set.
+double
+FmaToOdd(double x, double z, double y)
+{
+#ifdef BEBOX_HAVE_MXCSR
+	u32 csr = _mm_getcsr();
+	_mm_setcsr(csr | (3u << 13));		// toward zero
+#else
+	int rounding = fegetround();
+	fesetround(FE_TOWARDZERO);
+#endif
+	Pin(x);
+	Pin(z);
+	Pin(y);
+	double r = std::fma(x, z, y);
+	Pin(r);
+#ifdef BEBOX_HAVE_MXCSR
+	u32 after = _mm_getcsr();
+	_mm_setcsr((after & ~(3u << 13)) | (csr & (3u << 13)));
+	bool inexact = (after & kHostInexact) != 0;
+#else
+	bool inexact = fetestexcept(FE_INEXACT) != 0;
+	fesetround(rounding);
+#endif
+	if (inexact) {
+		if (std::isfinite(r))
+			r = ToDouble(ToBits(r) | 1);
+	} else if (r == 0) {
+		Pin(x);
+		Pin(z);
+		Pin(y);
+		r = std::fma(x, z, y);
+		Pin(r);
+	}
+	return r;
+}
+
+
 // x * z - r exactly, r being the rounded product (Dekker's product: no
 // fma, which hosts without the instruction do in software; normal
 // operands below 2^995, a product away from underflow; built with
@@ -356,9 +398,22 @@ ArithFast(PpcCpu& c, u32 i, ArithOp op, bool single)
 				if (!std::isfinite(r))
 					return false;
 				double bv = r - p;
-				inexact = (p - (r - bv)) + (yy - bv) != 0;
+				double error = (p - (r - bv)) + (yy - bv);
+				inexact = error != 0;
+				if (single && inexact && (ToBits(r) & 1) == 0) {
+					// rounded to odd (FmaToOdd()): the neighbour on the
+					// exact value's side
+					u64 bits = ToBits(r);
+					if ((error < 0) == (r < 0))
+						bits++;
+					else
+						bits--;
+					r = ToDouble(bits);
+				}
 				break;
 			}
+			if (single)
+				return false;	// rounded to odd by the general path
 			ClearHostFlags();
 			Pin(x);
 			Pin(z);
@@ -509,8 +564,12 @@ Arith(PpcCpu& c, u32 i, ArithOp op, bool single)
 			case kDiv: r = x / y; break;
 			// fnmadd and fnmsub round the un-negated result; the negation
 			// is applied after rounding (also to single precision).
-			case kMadd: case kNmadd: r = std::fma(x, z, y); break;
-			default: r = std::fma(x, z, -y); break;
+			case kMadd: case kNmadd:
+				r = single ? FmaToOdd(x, z, y) : std::fma(x, z, y);
+				break;
+			default:
+				r = single ? FmaToOdd(x, z, -y) : std::fma(x, z, -y);
+				break;
 		}
 		Pin(r);
 		// Rounding direction of the double result (fraction rounded).

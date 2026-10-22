@@ -16,10 +16,11 @@ using bebox::u32;
 
 static const uint32 kRingFrames = 1 << 15;		// 0.7 s at 44.1 kHz
 // Start playing once this much is buffered (smooths the start, and is
-// the steady state latency): 139 ms. When the emulation falls behind real
+// the steady state latency): 209 ms. When the emulation falls behind real
 // time for longer, the ring runs dry; then it buffers half as much more
-// from then on, up to just over the 250 ms the emulation catches up.
-static const uint32 kPrimeFrames = 6144;
+// from then on, up to just over the 250 ms the emulation catches up (so it
+// runs dry at most once before that).
+static const uint32 kPrimeFrames = 9216;
 static const uint32 kMaxPrimeFrames = 12288;
 // Rate control: the sound card's clock and the clock the emulation is
 // paced by drift apart (by more than 1% in some virtual machines), which

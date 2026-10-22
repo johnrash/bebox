@@ -336,6 +336,24 @@ FastArithmeticTests()
 	snprintf(what, sizeof(what), "fast path: %d of %d cases differ",
 		mismatches, kCases);
 	Expect(mismatches == 0, what);
+
+	// fmsubs f1,f2,f4,f3 rounds once to single, as the 603e (and qemu-ppc)
+	// do; rounding to double first gave one unit more in the last place
+	for (int k = 0; k < 2; k++) {
+		PpcCpu& cpu = k == 0 ? fast : general;
+		cpu.fpr[2] = 0x3fb999999999999aull;		// 0.1
+		cpu.fpr[3] = 0xbb1f1ab8e0000000ull;
+		cpu.fpr[4] = 0xbb1f1ab8e0000000ull;
+		cpu.SetFpscr(0);
+		PpcOps::sFastArithmetic = k == 0;
+		u32 fmsubs = (59u << 26) | (1 << 21) | (2 << 16) | (3 << 11)
+			| (4 << 6) | (28 << 1);
+		PpcOps::sPrimary[59](cpu, fmsubs);
+	}
+	PpcOps::sFastArithmetic = true;
+	Expect(fast.fpr[1] == 0x3b1bfe7320000000ull
+		&& general.fpr[1] == 0x3b1bfe7320000000ull,
+		"single precision multiply-add rounded once");
 }
 
 

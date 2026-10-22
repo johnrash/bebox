@@ -140,7 +140,7 @@ while the thread waits for real time; it never goes below the setting or
 a real BeBox: BeOS's sound (an MP3 decoder) needs every instruction of an
 emulated second, so a host that cannot keep up then slows time (catching
 up within 250 ms), and the sound output keeps more in reserve after it
-ran dry once (`HaikuAudio`: 139 ms, growing to 279 ms). A CPU that dozes
+ran dry once (`HaikuAudio`: 209 ms, growing to 279 ms). A CPU that dozes
 (MSR[POW] with HID0 DOZE/NAP) is halted until an exception is pending, and
 so is one that branches to itself with external interrupts enabled
 (`b .`): BeOS R4.5's idle loop, which would otherwise keep both processors
@@ -169,7 +169,11 @@ exception enabled, finite operands, results away from overflow and
 underflow): the rounding error of add, sub, mul and div comes exactly from
 2Sum and Dekker's product, a multiply-add whose product is exact (single
 precision operands: at most 48 significant bits) is a multiply and an add,
-and rounding to single is checked by converting back. That spares `fma`,
+and rounding to single is checked by converting back. A single precision
+multiply-add rounds once, as the 603e does: the fused result is rounded to
+odd in double precision first (toward zero, the last bit set when
+inexact; `FmaToOdd()`), so rounding it to single gives the same result as
+rounding the exact value. That spares `fma`,
 which hosts without the instruction (QEMU's virtual CPUs) do in software
 (9 to 15 ns a call). The builds use `-ffp-contract=off` (Dekker's product
 needs separate roundings), and values are pinned in registers around the
