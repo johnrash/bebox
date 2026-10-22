@@ -4,7 +4,8 @@
  * GD5434's cursor, the NE2000, the SCSI CD-ROM's disc changes, the
  * boot ROM's debug output key, the MPC105's memory banks, the threaded
  * mode's choice of one host thread or two, timers destroyed while armed,
- * disk image write errors and the log's settings.
+ * disk image write errors, the log's settings and frames that only pass
+ * on what changed.
  * Copyright 2026, the BeBox emulator authors. MIT License.
  */
 #include "core/board/BootItems.h"
@@ -219,11 +220,14 @@ TestS3Engine()
 class FrameCapture : public VideoSink {
 public:
 	virtual void FrameReady(const u32* pixels, int width, int height,
-		int stride)
+		int stride, int top, int bottom)
 	{
 		fPixels.assign(pixels, pixels + (size_t)stride * height);
 		fWidth = width;
 		fStride = stride;
+		fTop = top;
+		fBottom = bottom;
+		fCalls++;
 	}
 
 	u32 Pixel(int x, int y) const
@@ -234,6 +238,9 @@ public:
 	std::vector<u32> fPixels;
 	int fWidth = 0;
 	int fStride = 0;
+	int fTop = 0;
+	int fBottom = 0;
+	int fCalls = 0;
 };
 
 
@@ -287,6 +294,74 @@ TestS3Cursor()
 }
 
 
+
+
+// A frame passes on only the lines that changed: none when nothing did, a
+// line written, all of them for a palette change, the cursor's lines that
+// look different.
+void
+TestChangedLines()
+{
+	S3Test t;
+	FrameCapture frame;
+	t.fCard.SetVideoSink(&frame);
+	t.Crtc(0x3a, 0x10);				// enhanced mode, 640x480, 8 bpp
+	t.Crtc(0x01, 79);
+	t.Crtc(0x12, 479 & 0xff);
+	t.Crtc(0x07, 0x02);
+	t.Crtc(0x13, 80);
+	t.fIo.Read(0x3da, 1);
+	t.fIo.Write(0x3c0, 0x20, 1);		// display on
+	auto color = [&](u8 index, u8 r, u8 g, u8 b) {
+		t.fIo.Write(0x3c8, index, 1);
+		t.fIo.Write(0x3c9, r, 1);
+		t.fIo.Write(0x3c9, g, 1);
+		t.fIo.Write(0x3c9, b, 1);
+	};
+	color(1, 63, 0, 0);
+	t.fCard.RenderFrame();
+	Check(frame.fCalls == 1 && frame.fTop == 0 && frame.fBottom == 480,
+		"changed lines: the first frame whole");
+	t.fCard.RenderFrame();
+	Check(frame.fCalls == 1, "changed lines: no frame when nothing changed");
+	t.fCard.Vram()[100 * 640 + 5] = 1;
+	t.fCard.RenderFrame();
+	Check(frame.fCalls == 2 && frame.fTop == 100 && frame.fBottom == 101
+		&& frame.Pixel(5, 100) == 0xff0000 && frame.Pixel(6, 100) == 0,
+		"changed lines: a line written");
+	color(1, 0, 63, 0);
+	t.fCard.RenderFrame();
+	Check(frame.fCalls == 3 && frame.fTop == 0 && frame.fBottom == 480
+		&& frame.Pixel(5, 100) == 0x00ff00, "changed lines: a palette change");
+	// the cursor (its pattern past the picture): its first row inverts two
+	// pixels, the rest is clear
+	t.Crtc(0x4c, 0x02);				// pattern at 512 KB
+	t.Crtc(0x4d, 0x00);
+	for (int row = 0; row < 64; row++) {
+		for (int group = 0; group < 4; group++) {
+			// A set (transparent) except row 0's first two pixels: A, B
+			t.fCard.Vram()[0x80000 + row * 16 + group * 4] = 0xff;
+			t.fCard.Vram()[0x80000 + row * 16 + group * 4 + 1] = 0xff;
+		}
+	}
+	t.fCard.Vram()[0x80002] = 0xc0;
+	t.Crtc(0x46, 0x00);				// x = 40
+	t.Crtc(0x47, 40);
+	t.Crtc(0x48, 0x00);				// y = 10
+	t.Crtc(0x49, 10);
+	t.Crtc(0x45, 0x01);
+	t.fCard.RenderFrame();
+	Check(frame.fCalls == 4 && frame.fTop == 10 && frame.fBottom == 11
+		&& frame.Pixel(40, 10) == 0xffffff,
+		"changed lines: the cursor's line that changed");
+	t.Crtc(0x49, 20);				// y = 20
+	t.fCard.RenderFrame();
+	Check(frame.fCalls == 5 && frame.fTop == 10 && frame.fBottom == 21
+		&& frame.Pixel(40, 10) == 0 && frame.Pixel(40, 20) == 0xffffff,
+		"changed lines: the cursor moved");
+	t.fCard.RenderFrame();
+	Check(frame.fCalls == 5, "changed lines: no frame for a cursor at rest");
+}
 
 
 // The cursor patterns are in the last 16 KB of the memory in use: with 4 MB
@@ -1037,6 +1112,7 @@ main()
 	TestS3Dac();
 	TestS3Engine();
 	TestS3Cursor();
+	TestChangedLines();
 	TestCirrusCursor();
 	TestCdChange();
 	TestDebugKeyRelease();

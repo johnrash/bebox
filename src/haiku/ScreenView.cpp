@@ -32,6 +32,8 @@ ScreenView::ScreenView(bebox::EmulatorThread& emulator)
 	fEmulator(emulator),
 	fStagingWidth(640),
 	fStagingHeight(480),
+	fDirtyTop(0),
+	fDirtyBottom(480),
 	fFramePending(false),
 	fBitmap(nullptr),
 	fScale(1),
@@ -133,17 +135,23 @@ ScreenView::PreferredSize()
 
 void
 ScreenView::FrameReady(const uint32* pixels, int width, int height,
-	int stride)
+	int stride, int top, int bottom)
 {
 	{
 		std::lock_guard<std::mutex> lock(fLock);
-		fStaging.resize((size_t)width * height);
-		for (int y = 0; y < height; y++) {
+		if (width != fStagingWidth || height != fStagingHeight) {
+			fStaging.resize((size_t)width * height);
+			fStagingWidth = width;
+			fStagingHeight = height;
+			top = 0;
+			bottom = height;
+		}
+		for (int y = top; y < bottom; y++) {
 			memcpy(&fStaging[(size_t)y * width], pixels + (size_t)y * stride,
 				width * 4);
 		}
-		fStagingWidth = width;
-		fStagingHeight = height;
+		fDirtyTop = std::min(fDirtyTop, top);
+		fDirtyBottom = std::max(fDirtyBottom, bottom);
 	}
 	if (!fFramePending.exchange(true))
 		BMessenger(this).SendMessage(kMsgFrame);
@@ -151,18 +159,24 @@ ScreenView::FrameReady(const uint32* pixels, int width, int height,
 
 
 void
-ScreenView::_UpdateBitmap()
+ScreenView::_UpdateBitmap(int& top, int& bottom, bool& resized)
 {
 	std::lock_guard<std::mutex> lock(fLock);
 	BRect frame(0, 0, fStagingWidth - 1, fStagingHeight - 1);
-	bool resized = fBitmap == nullptr || fBitmap->Bounds() != frame;
+	resized = fBitmap == nullptr || fBitmap->Bounds() != frame;
 	if (resized) {
 		delete fBitmap;
 		fBitmap = new BBitmap(frame, B_RGB32);
+		fDirtyTop = 0;
+		fDirtyBottom = fStagingHeight;
 	}
+	top = std::max(0, fDirtyTop);
+	bottom = std::min(fStagingHeight, fDirtyBottom);
+	fDirtyTop = fStagingHeight;
+	fDirtyBottom = 0;
 	uint8* bits = (uint8*)fBitmap->Bits();
 	int32 rowBytes = fBitmap->BytesPerRow();
-	for (int y = 0; y < fStagingHeight; y++) {
+	for (int y = top; y < bottom; y++) {
 		memcpy(bits + (size_t)y * rowBytes,
 			&fStaging[(size_t)y * fStagingWidth], fStagingWidth * 4);
 	}
@@ -274,10 +288,25 @@ ScreenView::MessageReceived(BMessage* message)
 {
 	switch (message->what) {
 		case kMsgFrame:
+		{
 			fFramePending = false;
-			_UpdateBitmap();
-			Invalidate(_DestinationRect());
+			int top, bottom;
+			bool resized;
+			_UpdateBitmap(top, bottom, resized);
+			BRect destination = _DestinationRect();
+			if (resized)
+				Invalidate(destination);
+			else if (top < bottom) {
+				// the changed lines as scaled, a line more for the filter
+				float scale = (destination.Height() + 1) / fStagingHeight;
+				Invalidate(BRect(destination.left,
+					destination.top + floorf((top - 1) * scale),
+					destination.right,
+					destination.top + ceilf((bottom + 1) * scale) - 1)
+					& destination);
+			}
 			break;
+		}
 		case kMsgHintTimeout:
 			if (message->GetInt32("generation", 0) == fHintGeneration
 				&& fHint.Length() > 0) {
@@ -312,8 +341,12 @@ ScreenView::SetPowered(bool powered)
 		// the emulation thread has stopped: nothing refills the frame
 		std::lock_guard<std::mutex> lock(fLock);
 		std::fill(fStaging.begin(), fStaging.end(), 0);
+		fDirtyTop = 0;
+		fDirtyBottom = fStagingHeight;
 	}
-	_UpdateBitmap();
+	int top, bottom;
+	bool resized;
+	_UpdateBitmap(top, bottom, resized);
 	Invalidate();
 }
 

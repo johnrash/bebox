@@ -508,6 +508,20 @@ S3Vision864::HardwareCursor(int& x, int& y) const
 }
 
 
+// The pattern's rows from CR4F on, from the cursor's line on.
+bool
+S3Vision864::OverlayLines(int height, int& top, int& bottom) const
+{
+	int x, y;
+	if (!HardwareCursor(x, y))
+		return false;
+	int offsetY = fCrtc[0x4f] & 0x3f;
+	top = std::max(0, y);
+	bottom = std::min(height, y + 64 - offsetY);
+	return top < bottom;
+}
+
+
 // 64x64 cursor, 2 bits per pixel: per row four groups of 16 pixels, each a
 // 16-bit word of A bits followed by a word of B bits (leftmost pixel in
 // bit 7 of the first byte).

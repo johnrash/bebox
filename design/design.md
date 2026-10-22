@@ -238,7 +238,19 @@ Video cards derive from `VgaCore` (standard VGA registers, planar and
 chained memory access, text and graphics rendering) and add their
 extensions through hooks (`ComputeMode`, register reads and writes, banking,
 overlays). Each vertical retrace (60 Hz of emulated time) renders the
-visible frame into a host buffer handed to the `VideoSink`.
+visible frame into a host buffer handed to the `VideoSink` with the lines
+that changed, or not at all when nothing did. In the packed pixel modes
+(the desktop's) each line of video memory on the screen is compared with a
+copy of what was converted last time and only the changed lines are
+converted; the overlays (the hardware cursor, `OverlayLines()`) are drawn
+on a copy of that picture, and their lines count as changed only when
+they look different. The Haiku app then copies those lines into its
+bitmap and has app_server redraw just them. Text, planar and pixel doubled
+modes are converted whole every time. With R5 playing an MP3 (the screen
+mostly still), the display's timer went from 0.84 s to 0.09 s per 30 s,
+291 frames instead of 6300 reached the sink in a run of 105 s, and in the
+app on the Haiku VM the app took 396 ms of processor time a second
+instead of 438, app_server 2 ms instead of 23.
 
 The S3 Vision864's graphics engine executes commands at once (rectangle
 fill, BitBLT, pattern fill, Bresenham and radial lines, short stroke
@@ -267,8 +279,9 @@ spent about 30% in floating point (`Arith` 18%, reading and clearing the
 host's exception flags 9%, the FPSCR summary 2%); with `ArithFast()` it is
 about 15%, and the same 30 s of playback take 9.8 s instead of 11.2 s on
 the Linux host (306% of a real BeBox instead of 268%; 286% instead of 254%
-on the Haiku VM). It spends 6% converting frames for the display
-(`VgaCore::RenderFrame()`, 60 a second) and 14% in the dispatch loop; the
+on the Haiku VM). It spent 6% converting frames for the display
+(`VgaCore::RenderFrame()`, 60 a second; now only changed lines, under 1%)
+and spends 14% in the dispatch loop; the
 603's TLB misses come to about 60000 a second per processor, each a short
 handler in the guest.
 

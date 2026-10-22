@@ -289,12 +289,17 @@ public:
 	int height = 0;
 	u64 frames = 0;
 
-	virtual void FrameReady(const u32* data, int w, int h, int stride)
+	virtual void FrameReady(const u32* data, int w, int h, int stride,
+		int top, int bottom)
 	{
-		width = w;
-		height = h;
-		pixels.resize((size_t)w * h);
-		for (int y = 0; y < h; y++)
+		if (w != width || h != height) {
+			width = w;
+			height = h;
+			pixels.resize((size_t)w * h);
+			top = 0;
+			bottom = h;
+		}
+		for (int y = top; y < bottom; y++)
 			memcpy(&pixels[(size_t)y * w], data + (size_t)y * stride, w * 4);
 		frames++;
 	}
