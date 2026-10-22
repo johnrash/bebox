@@ -61,6 +61,14 @@ public:
 
 			// Two threads' speed over one thread's while they do not wait.
 			double				Speedup() const { return fSpeedup; }
+			// Decisions so far (for profiling).
+			struct Counts {
+				int				trials = 0;
+				int				probes = 0;
+				int				toOne = 0;		// switches to one thread
+				int				toTwo = 0;		// and back
+			};
+			const Counts&		GetCounts() const { return fCounts; }
 
 	static	double				HostSeconds();
 
@@ -96,6 +104,7 @@ private:
 			double				fTrialWaited;	// in the two threads' time
 			double				fBlock;			// time timed in this block
 			bool				fSkip;			// the block's first slice
+			Counts				fCounts;
 };
 
 }	// namespace bebox

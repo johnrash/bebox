@@ -5,6 +5,7 @@
 #include "Scheduler.h"
 
 #include <algorithm>
+#include <chrono>
 
 namespace bebox {
 
@@ -129,7 +130,15 @@ Scheduler::RunDue(u64 now)
 		u64 saved = fNow;
 		fNow = top.when;
 		sClockOwner = nullptr;
-		timer->fCallback();
+		if (fProfiling) {
+			auto start = std::chrono::steady_clock::now();
+			timer->fCallback();
+			TimerProfile& profile = fProfile[timer->fName];
+			profile.calls++;
+			profile.seconds += std::chrono::duration<double>(
+				std::chrono::steady_clock::now() - start).count();
+		} else
+			timer->fCallback();
 		fNow = saved;
 		sClockOwner = savedOwner;
 		sClock = savedClock;

@@ -139,6 +139,7 @@ void
 ThreadGovernor::RunEnded(double now)
 {
 	if (fState == kOne && now >= fNextProbe) {
+		fCounts.probes++;
 		fState = kProbe;
 		fTwoThreads = true;
 		fSettled = false;
@@ -162,6 +163,10 @@ ThreadGovernor::_Choose(bool twoThreads, double now)
 	// Probes back off while one thread stays faster.
 	bool fromOne = fState == kOne || fState == kProbe
 		|| (fState == kTrial && !fTrialFrom);
+	if (fromOne && twoThreads)
+		fCounts.toTwo++;
+	else if (!fromOne && !twoThreads)
+		fCounts.toOne++;
 	if (twoThreads)
 		fProbeInterval = kMinInterval;
 	else if (fromOne)
@@ -177,6 +182,7 @@ ThreadGovernor::_Choose(bool twoThreads, double now)
 void
 ThreadGovernor::_StartTrial(bool from)
 {
+	fCounts.trials++;
 	fState = kTrial;
 	fTrialFrom = from;
 	fInstructions[0] = fInstructions[1] = 0;

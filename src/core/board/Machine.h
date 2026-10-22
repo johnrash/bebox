@@ -110,6 +110,11 @@ public:
 			// One line: running, halted or held in reset, the program
 			// counter and the main control registers.
 	virtual	std::string			CpuState(int cpu) const = 0;
+			// Profiling (bebox-headless --stats): from now on, where the
+			// host's time goes; what the processors and devices did, as
+			// text.
+	virtual	void				SetProfiling(bool profiling) {}
+	virtual	std::string			Statistics() const { return ""; }
 			// The physical address of a virtual one, as the CPU sees it.
 	virtual	bool				DebugTranslate(int cpu, u32 va, u32& pa) = 0;
 

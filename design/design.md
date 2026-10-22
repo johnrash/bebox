@@ -233,6 +233,29 @@ vectors); commands that wait for CPU data (image and monochrome transfers)
 consume PIX_TRANS writes as they come. GP_STAT always reports an idle
 engine with an empty FIFO.
 
+## Profiling
+
+`bebox-headless --stats` reports, for the part of a run from
+`--stats-from MS` on: the run loop's host time (the processors' slices on
+one thread or two, the devices' timers between them, by timer name from
+`Scheduler::SetProfiling()`), the threaded mode's decisions
+(`ThreadGovernor::GetCounts()`), and per processor its slow paths
+(`PpcCpu::Stats`: translations its host side cache missed, instruction
+fetches from another page, cache flushes, device accesses, accesses across
+pages) and exceptions by vector. The counters sit in the slow paths only,
+so they are always on; the timing is only while profiling. `--profile`
+(Linux, x86-64) samples the program counter every millisecond of processor
+time (`SIGPROF`) and names the functions with `addr2line` (inlined
+functions under their own names).
+
+R4.5 booting (133 MHz, one thread) spends 96% in the processors: the
+dispatch loop, the opcode 31 table, branches and loads. R5 playing an MP3
+spends about 30% in floating point (`Arith` 18%, reading and clearing the
+host's exception flags 9%, the FPSCR summary 2%), 5% converting frames for
+the display (`VgaCore::RenderFrame()`, 60 a second) and 11% in the
+dispatch loop; the 603's TLB misses come to about 60000 a second per
+processor, each a short handler in the guest.
+
 ## Storage
 
 `DiskImage` is the interface for raw and QCOW2 images (versions 2 and 3:

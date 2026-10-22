@@ -119,6 +119,8 @@ public:
 	virtual	bool				CpuActive(int cpu) const;
 	virtual	u64					UnclaimedIoCount() const;
 	virtual	std::string			CpuState(int cpu) const;
+	virtual	void				SetProfiling(bool profiling);
+	virtual	std::string			Statistics() const;
 	virtual	bool				DebugTranslate(int cpu, u32 va, u32& pa);
 
 			// ISA interrupt request from a device: drives the 8259 and the
@@ -188,6 +190,17 @@ private:
 			std::unique_ptr<Worker> fWorker;
 			// a reset asked for by a device while the CPUs run
 			std::atomic<bool>	fPowerOnRequested;
+			// Profiling: the host time of the run loop's parts.
+			struct RunProfile {
+				double			oneThread = 0;	// the processors' slices
+				double			twoThreads = 0;
+				double			devices = 0;	// timers between slices
+				u64				slices = 0;
+				u64				bothRunning = 0;
+				u64				twoThreadSlices = 0;
+				u64				since = 0;		// machine time it began
+			};
+			std::unique_ptr<RunProfile> fProfile;
 };
 
 }	// namespace bebox

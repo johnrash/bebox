@@ -355,7 +355,9 @@ Terminal.
 
 `bebox-headless` runs a machine without a window, for tests and debugging:
 serial ports to files or TCP, scripted keys and mouse clicks, screenshots,
-instruction traces, memory dumps and watches. `bebox-headless --help` lists
+instruction traces, memory dumps and watches, and profiling (`--stats`:
+where the host's time goes and what the processors' slow paths did;
+`--profile`: the emulator's functions that take the time, on Linux). `bebox-headless --help` lists
 the options.
 
 ## Building

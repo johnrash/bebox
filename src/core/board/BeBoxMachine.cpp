@@ -31,6 +31,7 @@
 #include "../video/S3Vision864.h"
 
 #include <algorithm>
+#include <cinttypes>
 #include <cstdio>
 #include <condition_variable>
 #include <cstring>
@@ -831,9 +832,13 @@ BeBoxMachine::RunFor(u64 ticks)
 			if (cpu->Now() < fNow)
 				cpu->SetNow(fNow);
 		}
+		RunProfile* profile = fProfile.get();
+		double start = profile != nullptr ? ThreadGovernor::HostSeconds() : 0;
+		bool bothRunning = fCpus.size() == 2 && !fCpus[0]->IsHalted()
+			&& !fCpus[1]->IsHalted();
 		// A CPU in reset or dozing does next to nothing: then the other
 		// one runs on this thread too, without waiting for the worker.
-		if (fWorker && !fCpus[0]->IsHalted() && !fCpus[1]->IsHalted()) {
+		if (fWorker && bothRunning) {
 			if (bothStart == 0)
 				bothStart = ThreadGovernor::HostSeconds();
 			twoThreads = _RunSliceThreaded(sliceEnd, twoThreads);
@@ -844,11 +849,24 @@ BeBoxMachine::RunFor(u64 ticks)
 			_RunSliceOneThread(sliceEnd);
 			twoThreads = false;
 		}
+		double ran = 0;
+		if (profile != nullptr) {
+			ran = ThreadGovernor::HostSeconds();
+			profile->slices++;
+			profile->bothRunning += bothRunning ? 1 : 0;
+			if (twoThreads) {
+				profile->twoThreads += ran - start;
+				profile->twoThreadSlices++;
+			} else
+				profile->oneThread += ran - start;
+		}
 		fNow = sliceEnd;
 		fScheduler.SetNow(fNow);
 		fScheduler.RunDue(fNow);
 		if (fPowerOnRequested.exchange(false))
 			PowerOn();
+		if (profile != nullptr)
+			profile->devices += ThreadGovernor::HostSeconds() - ran;
 	}
 	if (fWorker) {
 		double now = bothStart != 0 ? _BothRan(bothStart)
@@ -903,6 +921,100 @@ u64
 BeBoxMachine::UnclaimedIoCount() const
 {
 	return fIo->UnclaimedCount();
+}
+
+
+void
+BeBoxMachine::SetProfiling(bool profiling)
+{
+	fProfile.reset(profiling ? new RunProfile : nullptr);
+	if (fProfile)
+		fProfile->since = fNow;
+	fScheduler.SetProfiling(profiling);
+}
+
+
+// Where the host's time went while profiling, and what the processors'
+// slow paths and the devices' timers did.
+std::string
+BeBoxMachine::Statistics() const
+{
+	static const char* const kExceptions[32] = {
+		nullptr, "reset", "machine check", "DSI", "ISI", "external",
+		"alignment", "program", "FP unavailable", "decrementer", nullptr,
+		nullptr, "system call", "trace", nullptr, nullptr, "ITLB miss",
+		"DTLB load miss", "DTLB store miss", "breakpoint", "SMI" };
+	std::string text;
+	char line[256];
+	if (fProfile) {
+		const RunProfile& p = *fProfile;
+		double total = p.oneThread + p.twoThreads + p.devices;
+		auto share = [total](double seconds) {
+			return total > 0 ? 100 * seconds / total : 0;
+		};
+		double emulated = (fNow - p.since) / (double)fTicksPerSecond;
+		snprintf(line, sizeof(line), "run loop: %.3f s for %.3f emulated s "
+			"(%.0f%%): processors on one thread %.3f s (%.0f%%), on two "
+			"%.3f s (%.0f%%), devices' timers %.3f s (%.0f%%)\n", total,
+			emulated, total > 0 ? 100 * emulated / total : 0, p.oneThread,
+			share(p.oneThread), p.twoThreads, share(p.twoThreads),
+			p.devices, share(p.devices));
+		text += line;
+		snprintf(line, sizeof(line), "slices: %" PRIu64 ", both processors "
+			"running in %" PRIu64 ", on two threads %" PRIu64 "\n", p.slices,
+			p.bothRunning, p.twoThreadSlices);
+		text += line;
+	}
+	if (fWorker) {
+		const ThreadGovernor& governor = fWorker->governor;
+		const ThreadGovernor::Counts& counts = governor.GetCounts();
+		snprintf(line, sizeof(line), "threads: now %s, speedup %.2f; %d "
+			"trials, %d probes, %d switches to one thread, %d back\n",
+			governor.TwoThreads() ? "two" : "one", governor.Speedup(),
+			counts.trials, counts.probes, counts.toOne, counts.toTwo);
+		text += line;
+	}
+	for (size_t i = 0; i < fCpus.size(); i++) {
+		const PpcCpu& cpu = *fCpus[i];
+		const PpcCpu::Stats& s = cpu.GetStats();
+		double thousands = std::max<double>(1, cpu.InstructionCount()) / 1000;
+		snprintf(line, sizeof(line), "cpu%zu: %.1f M instructions; per 1000: "
+			"translations read %.2f, write %.2f, fetch %.2f, fetch page "
+			"changes %.2f, device accesses %.2f, across pages %.3f; %" PRIu64
+			" flushes\n", i, cpu.InstructionCount() / 1e6,
+			s.softMisses[0] / thousands, s.softMisses[1] / thousands,
+			s.softMisses[2] / thousands, s.fetchPages / thousands,
+			s.deviceAccesses / thousands, s.crossPage / thousands,
+			s.flushes);
+		text += line;
+		std::string exceptions;
+		for (int v = 0; v < 32; v++) {
+			if (s.exceptions[v] == 0)
+				continue;
+			snprintf(line, sizeof(line), "%s%s %" PRIu64,
+				exceptions.empty() ? "" : ", ",
+				kExceptions[v] != nullptr ? kExceptions[v] : "?",
+				s.exceptions[v]);
+			exceptions += line;
+		}
+		if (!exceptions.empty())
+			text += "  exceptions: " + exceptions + "\n";
+	}
+	const auto& timers = fScheduler.Profile();
+	if (!timers.empty()) {
+		std::vector<std::pair<double, std::string> > sorted;
+		for (const auto& item : timers) {
+			snprintf(line, sizeof(line), "  %-24s %8.3f s %10" PRIu64
+				" calls\n", item.first.c_str(), item.second.seconds,
+				item.second.calls);
+			sorted.push_back(std::make_pair(item.second.seconds, line));
+		}
+		std::sort(sorted.rbegin(), sorted.rend());
+		text += "timers (host time):\n";
+		for (const auto& item : sorted)
+			text += item.second;
+	}
+	return text;
 }
 
 
