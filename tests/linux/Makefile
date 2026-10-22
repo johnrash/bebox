@@ -10,7 +10,8 @@ CORE := $(ROOT)/src/core
 OUT := out
 
 CXX ?= g++
-CXXFLAGS := -std=c++17 -Wall -Wextra -Wno-unused-parameter -g -I$(ROOT)/src
+CXXFLAGS := -std=c++17 -Wall -Wextra -Wno-unused-parameter -g -I$(ROOT)/src \
+	-ffp-contract=off
 ifeq ($(FAST),1)
 	CXXFLAGS += -O2 -DNDEBUG
 	OUT := out/fast

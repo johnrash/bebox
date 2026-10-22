@@ -5,16 +5,21 @@
  *    CPU; the program records its own checks.
  *  - ppc/smptest.S: lwarx/stwcx. on two CPUs sharing memory, interleaved
  *    with small time slices.
+ *  - the floating point arithmetic instructions' fast path against their
+ *    general path, on random operands.
  *
  * usage: cpu-unit-tests <dir with systest.bin and smptest.bin>
  */
 #include "core/Log.h"
 #include "core/bus/PhysBus.h"
 #include "core/cpu/PpcCpu.h"
+#include "core/cpu/PpcOps.h"
 
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -213,6 +218,127 @@ ThreadedSmpTests(const std::string& dir)
 }
 
 
+// An operand for the floating point tests: all exponents, single precision
+// values, small integers, values near the fast path's limits and the
+// range's ends, denormals, zeros, infinities and NaNs.
+static u64
+RandomOperand(std::mt19937_64& random)
+{
+	auto bits = [](double value) {
+		u64 result;
+		memcpy(&result, &value, 8);
+		return result;
+	};
+	u64 sign = (random() & 1) << 63;
+	switch (random() % 10) {
+		case 0:
+		case 1:
+		case 2:
+			return random();
+		case 3:
+		case 4:
+		{
+			u32 word = (u32)random();
+			if ((word & 0x7f800000) == 0x7f800000)
+				word &= ~0x40000000u;
+			float value;
+			memcpy(&value, &word, 4);
+			return bits(value);
+		}
+		case 5:
+			return sign | bits((double)(random() % 64)
+				* std::ldexp(1.0, (int)(random() % 9) - 4));
+		case 6:
+		{
+			static const int kExponents[] = { -1074, -1060, -1022, -1021,
+				-969, -961, -960, -959, -901, -900, -899, -149, -126, -125,
+				127, 128, 899, 900, 901, 1022, 1023 };
+			int e = kExponents[random() % (sizeof(kExponents) / sizeof(int))];
+			double m = 1 + (double)(random() >> 11) / 9007199254740992.0;
+			return sign | bits(std::ldexp(m, e));
+		}
+		case 7:
+			return sign | (random() & 0xfffffffffffffull);	// denormal
+		case 8:
+			return sign | (random() % 4 == 0 ? 0 : bits(1.0));
+		default:
+		{
+			static const u64 kSpecial[] = { 0x7ff0000000000000ull,
+				0x7ff8000000000000ull, 0x7ff4000000000000ull,
+				0x7fefffffffffffffull, 0x0010000000000000ull,
+				0x47efffffe0000000ull, 0x47efffffffffffffull,
+				0x3810000000000000ull, 0x380fffffffffffffull };
+			return sign | kSpecial[random() % 9];
+		}
+	}
+}
+
+
+static void
+FastArithmeticTests()
+{
+	printf("== floating point arithmetic: fast path against general path\n");
+	std::vector<u8> ram(4096, 0);
+	PhysBus bus;
+	bus.MapMemory(0, (u32)ram.size(), ram.data(), true);
+	PpcCpu::Config config;
+	PpcCpu fast(bus, config);
+	PpcCpu general(bus, config);
+	fast.SetMsr(MSR_FP);
+	general.SetMsr(MSR_FP);
+	std::mt19937_64 random(1);
+	// fdiv, fsub, fadd, fmul, fmsub, fmadd, fnmsub, fnmadd
+	static const u32 kForms[] = { 18, 20, 21, 25, 28, 29, 30, 31 };
+	int mismatches = 0;
+	const int kCases = 1000000;
+	for (int n = 0; n < kCases; n++) {
+		bool single = (random() & 1) != 0;
+		u32 instruction = ((single ? 59u : 63u) << 26) | (1 << 21) | (2 << 16)
+			| (3 << 11) | (4 << 6) | (kForms[random() % 8] << 1)
+			| (u32)(random() & 1);
+		u64 a = RandomOperand(random);
+		u64 b = random() % 8 == 0 ? a ^ (random() % 2 << 63)
+			: RandomOperand(random);	// cancellations
+		u64 c = RandomOperand(random);
+		// mostly the fast path's case, some sticky bits; now and then
+		// another rounding mode, enabled exceptions or non-IEEE mode
+		u32 fpscr = (u32)random() & 0x9e000000;
+		if (random() % 8 == 0)
+			fpscr |= (u32)random() & 0xff;
+		u32 cr = (u32)random();
+		PpcCpu* cpus[2] = { &fast, &general };
+		for (int k = 0; k < 2; k++) {
+			PpcCpu& cpu = *cpus[k];
+			cpu.fpr[1] = 0x123456789abcdefull;
+			cpu.fpr[2] = a;
+			cpu.fpr[3] = b;
+			cpu.fpr[4] = c;
+			cpu.SetFpscr(fpscr);
+			cpu.fCr = cr;
+			PpcOps::sFastArithmetic = k == 0;
+			PpcOps::sPrimary[instruction >> 26](cpu, instruction);
+		}
+		if (fast.fpr[1] != general.fpr[1] || fast.GetFpscr() != general.GetFpscr()
+			|| fast.fCr != general.fCr) {
+			if (mismatches++ < 10) {
+				printf("  %08x a %016llx b %016llx c %016llx fpscr %08x: "
+					"fast %016llx %08x, general %016llx %08x\n", instruction,
+					(unsigned long long)a, (unsigned long long)b,
+					(unsigned long long)c, fpscr,
+					(unsigned long long)fast.fpr[1], fast.GetFpscr(),
+					(unsigned long long)general.fpr[1], general.GetFpscr());
+			}
+		}
+	}
+	PpcOps::sFastArithmetic = true;
+	PpcOps::SetHostRounding(0);
+	char what[96];
+	snprintf(what, sizeof(what), "fast path: %d of %d cases differ",
+		mismatches, kCases);
+	Expect(mismatches == 0, what);
+}
+
+
 int
 main(int argc, char** argv)
 {
@@ -221,6 +347,7 @@ main(int argc, char** argv)
 	SmpTests(dir);
 	for (int i = 0; i < 5; i++)
 		ThreadedSmpTests(dir);
+	FastArithmeticTests();
 	printf("%d checks, %d failures\n", sChecks, sFailures);
 	return sFailures == 0 ? 0 : 1;
 }

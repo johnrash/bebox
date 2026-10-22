@@ -162,7 +162,20 @@ segment, BAT, SDR1 and MSR changes. Instructions are fetched from memory
 each time (no predecoding), so self-modifying code needs no tracking.
 
 The FPU uses host doubles (with `fma` for the fused instructions), rounds
-single precision results and keeps the FPSCR status bits.
+single precision results and keeps the FPSCR status bits. The general
+path reads the host's exception flags (MXCSR) around each operation;
+`ArithFast()` takes the common case without them (round to nearest, no
+exception enabled, finite operands, results away from overflow and
+underflow): the rounding error of add, sub, mul and div comes exactly from
+2Sum and Dekker's product, a multiply-add whose product is exact (single
+precision operands: at most 48 significant bits) is a multiply and an add,
+and rounding to single is checked by converting back. That spares `fma`,
+which hosts without the instruction (QEMU's virtual CPUs) do in software
+(9 to 15 ns a call). The builds use `-ffp-contract=off` (Dekker's product
+needs separate roundings), and values are pinned in registers around the
+flag reads (`Pin()`: the compiler does not know that arithmetic sets them).
+`cpu-unit-tests` runs a million random cases through both paths and
+expects the same results and FPSCR bit for bit.
 
 Tests: `tools/ppc-testgen.py` builds small programs with the PowerPC cross
 toolchain; `tests/linux/run-ppc-oracle.sh` runs them here and under
@@ -250,11 +263,14 @@ functions under their own names).
 
 R4.5 booting (133 MHz, one thread) spends 96% in the processors: the
 dispatch loop, the opcode 31 table, branches and loads. R5 playing an MP3
-spends about 30% in floating point (`Arith` 18%, reading and clearing the
-host's exception flags 9%, the FPSCR summary 2%), 5% converting frames for
-the display (`VgaCore::RenderFrame()`, 60 a second) and 11% in the
-dispatch loop; the 603's TLB misses come to about 60000 a second per
-processor, each a short handler in the guest.
+spent about 30% in floating point (`Arith` 18%, reading and clearing the
+host's exception flags 9%, the FPSCR summary 2%); with `ArithFast()` it is
+about 15%, and the same 30 s of playback take 9.8 s instead of 11.2 s on
+the Linux host (306% of a real BeBox instead of 268%; 286% instead of 254%
+on the Haiku VM). It spends 6% converting frames for the display
+(`VgaCore::RenderFrame()`, 60 a second) and 14% in the dispatch loop; the
+603's TLB misses come to about 60000 a second per processor, each a short
+handler in the guest.
 
 ## Storage
 

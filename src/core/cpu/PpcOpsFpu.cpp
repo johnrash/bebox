@@ -6,7 +6,9 @@
  * (MXCSR on x86) give overflow, underflow and inexact; invalid operation
  * and zero divide are classified explicitly because the PowerPC reports
  * their causes separately. NaN results follow the PowerPC precedence
- * (frA, frB, frC) instead of the host's.
+ * (frA, frB, frC) instead of the host's. The common case of the
+ * arithmetic instructions takes a fast path (ArithFast()) that reads the
+ * host's flags at most once.
  */
 #include "PpcOps.h"
 
@@ -79,6 +81,22 @@ ClearHostFlags()
 	_mm_setcsr(_mm_getcsr() & ~0x3fu);
 #else
 	feclearexcept(FE_ALL_EXCEPT);
+#endif
+}
+
+
+// Holds a value in a register at this point. The compiler does not know
+// that host arithmetic sets the exception flags: pinning its operands
+// after ClearHostFlags() and its result before HostFlags() keeps it in
+// between.
+template<typename T>
+inline void
+Pin(T& value)
+{
+#if defined(__x86_64__)
+	__asm__ volatile("" : "+x"(value));
+#else
+	__asm__ volatile("" : "+m"(value));
 #endif
 }
 
@@ -166,14 +184,15 @@ CheckFpAvailable(PpcCpu& c)
 
 
 // Sets exception bits, FX for bits that were not set before, and the
-// summary bits.
+// summary bits (which every change of the FPSCR keeps up to date: with no
+// new bit they stay).
 inline void
 SetExceptions(PpcCpu& c, u32 bits)
 {
 	bits &= kExceptionBits;
-	if ((bits & ~c.fFpscr) != 0)
-		c.fFpscr |= FX;
-	c.fFpscr |= bits;
+	if ((bits & ~c.fFpscr) == 0)
+		return;
+	c.fFpscr |= FX | bits;
 	PpcOps::UpdateFpscrSummary(c);
 }
 
@@ -202,12 +221,202 @@ enum ArithOp {
 };
 
 
+// The bits of a finite double's significand from the highest one set to
+// the lowest (0 for zero): two whose sum is at most 53 multiply exactly
+// (single precision values have at most 24).
+inline int
+SignificantBits(u64 bits)
+{
+	u64 significand = bits & 0xfffffffffffffull;
+	if ((bits & 0x7ff0000000000000ull) != 0)
+		significand |= 1ull << 52;
+	if (significand == 0)
+		return 0;
+	return 64 - __builtin_clzll(significand) - __builtin_ctzll(significand);
+}
+
+
+// x * z - r exactly, r being the rounded product (Dekker's product: no
+// fma, which hosts without the instruction do in software; normal
+// operands below 2^995, a product away from underflow; built with
+// -ffp-contract=off).
+inline double
+ProductError(double x, double z, double r)
+{
+	const double kSplit = 134217729.0;	// 2^27 + 1
+	double cx = kSplit * x;
+	double xh = cx - (cx - x);
+	double xl = x - xh;
+	double cz = kSplit * z;
+	double zh = cz - (cz - z);
+	double zl = z - zh;
+	return ((xh * zh - r) + xh * zl + xl * zh) + xl * zl;
+}
+
+
+// The common case of the arithmetic instructions: round to nearest, no
+// exception enabled, IEEE mode, finite operands, a divisor that is not
+// zero, results away from overflow and underflow. The rounding error of
+// add, sub, mul and div is computed exactly (2Sum, Dekker's product), so
+// they leave the host's exception flags alone; so do the multiply-adds
+// whose product is exact (single precision operands: a plain multiply,
+// then an add), the others read them once. Rounding to single precision
+// is checked by converting back. Returns false for the general path;
+// where both apply, the results and FPSCR are the same bit for bit
+// (cpu-unit-tests compares them).
+bool
+ArithFast(PpcCpu& c, u32 i, ArithOp op, bool single)
+{
+	u32& fpscr = c.fFpscr;
+	if ((fpscr & (VE | OE | UE | ZE | XE | NI | RN_MASK)) != 0)
+		return false;
+	const u64 kExponent = 0x7ff0000000000000ull;
+	u64 a = F[PPC_RA(i)];
+	u64 b = F[PPC_RB(i)];
+	u64 cc = F[PPC_RC(i)];
+	bool usesB = op != kMul;
+	bool usesC = op == kMul || op >= kMadd;
+	if ((a & kExponent) == kExponent
+		|| (usesB && (b & kExponent) == kExponent)
+		|| (usesC && (cc & kExponent) == kExponent))
+		return false;
+	double x = ToDouble(a);
+	double y = ToDouble(b);
+	double z = ToDouble(cc);
+	double r;
+	bool inexact = false;
+	bool roundedUp = false;
+	switch (op) {
+		case kAdd:
+		case kSub:
+		{
+			double yy = op == kSub ? -y : y;
+			r = x + yy;
+			if (!std::isfinite(r))
+				return false;
+			// sums are exact when tiny: no underflow
+			double bv = r - x;
+			double error = (x - (r - bv)) + (yy - bv);
+			inexact = error != 0;
+			roundedUp = inexact && ((error < 0) != (r < 0));
+			break;
+		}
+		case kMul:
+		{
+			r = x * z;
+			if (IsZero(a) || IsZero(cc))
+				break;
+			// the error is a double here
+			if (!(std::fabs(r) >= 0x1p-960) || !std::isfinite(r))
+				return false;
+			if (SignificantBits(a) + SignificantBits(cc) <= 53)
+				break;
+			if ((a & kExponent) == 0 || (cc & kExponent) == 0
+				|| !(std::fabs(x) < 0x1p995 && std::fabs(z) < 0x1p995))
+				return false;
+			double error = ProductError(x, z, r);
+			inexact = error != 0;
+			roundedUp = inexact && ((error < 0) != (r < 0));
+			break;
+		}
+		case kDiv:
+		{
+			if (IsZero(b))
+				return false;
+			r = x / y;
+			if (IsZero(a))
+				break;
+			// the remainder is a double here, Dekker's product does not
+			// overflow
+			double ax = std::fabs(x);
+			double ay = std::fabs(y);
+			double ar = std::fabs(r);
+			if (!(ax >= 0x1p-900 && ax <= 0x1p900 && ay >= 0x1p-900
+					&& ay <= 0x1p900 && ar >= 0x1p-900 && ar <= 0x1p900))
+				return false;
+			// x - p is exact (p is close to x), and so is the remainder
+			double p = r * y;
+			double remainder = (x - p) - ProductError(r, y, p);
+			double error = remainder / y;
+			inexact = error != 0;
+			roundedUp = inexact && ((error < 0) != (r < 0));
+			break;
+		}
+		default:
+		{
+			// (the general path does not tell FR for these either)
+			double yy = op == kMadd || op == kNmadd ? y : -y;
+			double p = x * z;
+			if (IsZero(a) || IsZero(cc)
+				|| (SignificantBits(a) + SignificantBits(cc) <= 53
+					&& std::fabs(p) >= 0x1p-960)) {
+				// an exact product: one rounding, in the add (sums are
+				// exact when tiny)
+				r = p + yy;
+				if (!std::isfinite(r))
+					return false;
+				double bv = r - p;
+				inexact = (p - (r - bv)) + (yy - bv) != 0;
+				break;
+			}
+			ClearHostFlags();
+			Pin(x);
+			Pin(z);
+			Pin(yy);
+			r = std::fma(x, z, yy);
+			Pin(r);
+			u32 hostFlags = HostFlags();
+			if ((hostFlags & (kHostOverflow | kHostUnderflow)) != 0)
+				return false;
+			inexact = (hostFlags & kHostInexact) != 0;
+			break;
+		}
+	}
+	bool underflow = false;
+	if (single) {
+		float f = (float)r;
+		if (std::isinf(f))
+			return false;
+		double back = (double)f;
+		if (back != r) {
+			inexact = true;
+			roundedUp = std::fabs(back) > std::fabs(r);
+			// tiny before rounding (the host tells after rounding)
+			underflow = std::fabs(r) < 1.17549435082228750797e-38;
+		}
+		r = back;
+	} else if (inexact && roundedUp && std::fabs(r) == 2.2250738585072014e-308)
+		underflow = true;
+	if (op == kNmadd || op == kNmsub)
+		r = -r;
+
+	u64 result = ToBits(r);
+	F[PPC_RD(i)] = result;
+	fpscr &= ~(FR | FI | FPRF_MASK);
+	fpscr |= Fprf(result) << 12;
+	u32 exceptions = 0;
+	if (inexact) {
+		fpscr |= roundedUp ? FI | FR : FI;
+		exceptions |= XX;
+	}
+	if (underflow)
+		exceptions |= UX;
+	SetExceptions(c, exceptions);
+	if (PPC_RCBIT(i))
+		SetCr1(c);
+	CheckEnabled(c);
+	return true;
+}
+
+
 // Common path of the arithmetic instructions. a, b, c are the operands as
 // named by the instruction (frA, frB, frC); unused ones are 0.
 void
 Arith(PpcCpu& c, u32 i, ArithOp op, bool single)
 {
 	if (!CheckFpAvailable(c))
+		return;
+	if (PpcOps::sFastArithmetic && ArithFast(c, i, op, single))
 		return;
 	int d = PPC_RD(i);
 	u64 a = F[PPC_RA(i)];
@@ -290,6 +499,9 @@ Arith(PpcCpu& c, u32 i, ArithOp op, bool single)
 		double z = ToDouble(cc);
 		double r;
 		ClearHostFlags();
+		Pin(x);
+		Pin(y);
+		Pin(z);
 		switch (op) {
 			case kAdd: r = x + y; break;
 			case kSub: r = x - y; break;
@@ -300,6 +512,7 @@ Arith(PpcCpu& c, u32 i, ArithOp op, bool single)
 			case kMadd: case kNmadd: r = std::fma(x, z, y); break;
 			default: r = std::fma(x, z, -y); break;
 		}
+		Pin(r);
 		// Rounding direction of the double result (fraction rounded).
 		bool roundedUp = false;
 		u32 hostFlags = HostFlags();
@@ -324,7 +537,9 @@ Arith(PpcCpu& c, u32 i, ArithOp op, bool single)
 		}
 		if (single) {
 			ClearHostFlags();
+			Pin(r);
 			float f = (float)r;
+			Pin(f);
 			u32 singleFlags = HostFlags();
 			if ((singleFlags & kHostInexact) != 0 && std::isfinite(f)) {
 				double back = (double)f;
@@ -419,7 +634,9 @@ RoundToSingle(PpcCpu& c, u32 i, u64 b, bool estimate)
 	} else {
 		double r = ToDouble(b);
 		ClearHostFlags();
+		Pin(r);
 		float f = (float)r;
+		Pin(f);
 		u32 flags = HostFlags();
 		result = ToBits((double)f);
 		fpscr &= ~(FR | FI);
@@ -876,6 +1093,9 @@ Op_stfiwx(PpcCpu& c, u32 i)
 }
 
 }	// namespace
+
+
+bool PpcOps::sFastArithmetic = true;
 
 
 void

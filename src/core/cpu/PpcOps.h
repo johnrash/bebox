@@ -28,6 +28,9 @@ struct PpcOps {
 	static void SetHostRounding(u32 fpscr);
 	// Recomputes FPSCR[VX] and FPSCR[FEX] from the other bits.
 	static void UpdateFpscrSummary(PpcCpu& cpu);
+	// The arithmetic instructions' fast path (tests compare it with the
+	// general one).
+	static bool sFastArithmetic;
 };
 
 // Instruction fields.
