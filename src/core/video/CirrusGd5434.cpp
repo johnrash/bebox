@@ -703,6 +703,18 @@ CirrusGd5434::HardwareCursor(int& x, int& y) const
 }
 
 
+bool
+CirrusGd5434::OverlayLines(int height, int& top, int& bottom) const
+{
+	if ((fSeq[0x12] & 1) == 0)
+		return false;
+	int size = (fSeq[0x12] & 0x04) != 0 ? 64 : 32;
+	top = std::max(0, (int)fCursorY);
+	bottom = std::min(height, (int)fCursorY + size);
+	return top < bottom;
+}
+
+
 void
 CirrusGd5434::DrawOverlays(u32* frame, int width, int height, int stride)
 {

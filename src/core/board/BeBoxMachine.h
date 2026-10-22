@@ -75,6 +75,8 @@ public:
 	virtual	u64					TicksPerSecond() const
 									{ return fTicksPerSecond; }
 	virtual	u64					InstructionCount() const;
+	virtual	double				NominalInstructionTicks() const;
+	virtual	void				SetInstructionTicks(u32 ticks);
 
 			// Components
 	virtual	PhysBus&			Bus() { return *fBus; }
@@ -117,6 +119,8 @@ public:
 	virtual	bool				CpuActive(int cpu) const;
 	virtual	u64					UnclaimedIoCount() const;
 	virtual	std::string			CpuState(int cpu) const;
+	virtual	void				SetProfiling(bool profiling);
+	virtual	std::string			Statistics() const;
 	virtual	bool				DebugTranslate(int cpu, u32 va, u32& pa);
 
 			// ISA interrupt request from a device: drives the 8259 and the
@@ -134,7 +138,11 @@ private:
 			void				_StartWorker();
 			void				_StopWorker();
 			void				_RunWorker();
-			void				_RunSliceThreaded(u64 sliceEnd);
+			bool				_RunSliceThreaded(u64 sliceEnd,
+									bool continued);
+			void				_HandOver(u64 sliceEnd, bool continued);
+			double				_BothRan(double start);
+			void				_RunSliceOneThread(u64 sliceEnd);
 			void				_CheckKernelEntry();
 			void				_DebugOutputStarted();
 
@@ -175,11 +183,24 @@ private:
 			bool				fDebugKeyHeld = false;
 
 			// Threaded mode (MachineConfig::threadPerCpu): CPU 1 runs on
-			// a worker thread, CPU 0 on the thread calling RunFor().
+			// a worker thread, CPU 0 on the thread calling RunFor(), or
+			// both on that thread while the host's cores are busy
+			// (ThreadGovernor).
 			struct Worker;
 			std::unique_ptr<Worker> fWorker;
 			// a reset asked for by a device while the CPUs run
 			std::atomic<bool>	fPowerOnRequested;
+			// Profiling: the host time of the run loop's parts.
+			struct RunProfile {
+				double			oneThread = 0;	// the processors' slices
+				double			twoThreads = 0;
+				double			devices = 0;	// timers between slices
+				u64				slices = 0;
+				u64				bothRunning = 0;
+				u64				twoThreadSlices = 0;
+				u64				since = 0;		// machine time it began
+			};
+			std::unique_ptr<RunProfile> fProfile;
 };
 
 }	// namespace bebox

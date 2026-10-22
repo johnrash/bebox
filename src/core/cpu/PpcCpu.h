@@ -164,6 +164,11 @@ public:
 									{ if (!_IsForeignThread())
 										fNow = now; }
 			const u64*			NowPointer() const { return &fNow; }
+			// The time an instruction takes (between time slices; the
+			// machine varies it to set the processor's speed).
+			void				SetTicksPerInstruction(u32 ticks)
+									{ fConfig.ticksPerInstruction
+										= ticks > 0 ? ticks : 1; }
 
 			// Input signals. Any thread may set them; in threaded mode
 			// what changes the CPU's state (reset, a bus map change) is
@@ -219,6 +224,21 @@ public:
 
 			u64					InstructionCount() const
 									{ return fInstructions; }
+
+			// Counts of the slow paths, for profiling (the fast paths
+			// count nothing).
+			struct Stats {
+				// the host side cache of translations missed: read, write,
+				// fetch (an instruction fetch from another page that it
+				// had: fetchPages)
+				u64				softMisses[3] = { 0, 0, 0 };
+				u64				fetchPages = 0;
+				u64				flushes = 0;	// of that cache
+				u64				deviceAccesses = 0;
+				u64				crossPage = 0;	// accesses across pages
+				u64				exceptions[32] = {};	// by vector / 0x100
+			};
+			const Stats&		GetStats() const { return fStats; }
 
 	// BusMapListener
 	virtual	void				BusMapChanged();
@@ -421,6 +441,7 @@ private:
 			PpcTraceHook*		fTraceHook;
 			u64					fInstructions;
 			u64					fExceptions;
+			Stats				fStats;
 			u32					fHostMxcsr;
 };
 

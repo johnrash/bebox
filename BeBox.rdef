@@ -7,7 +7,7 @@ resource app_flags B_SINGLE_LAUNCH;
 
 resource app_version {
 	major  = 1,
-	middle = 1,
+	middle = 2,
 	minor  = 0,
 	variety = B_APPV_FINAL,
 	internal = 0,
@@ -24,5 +24,8 @@ resource(201, "joystick") #'VICN' import "artwork/icons/Prefs_Joystick.hvif";
 resource(202, "floppy") #'VICN' import "artwork/icons/Device_Floppy.hvif";
 resource(203, "cd") #'VICN' import "artwork/icons/Device_CD.hvif";
 resource(204, "harddisk") #'VICN' import "artwork/icons/Device_Harddisk.hvif";
-/* Prefs_VirtualMemory with Overlay_Be on top (tools/merge_hvif.py). */
+resource(206, "mouse") #'VICN' import "artwork/icons/Prefs_Mouse.hvif";
+resource(207, "speaker") #'VICN' import "artwork/icons/Misc_Speaker_Box.hvif";
+/* Prefs_VirtualMemory with Overlay_Be on top (tools/merge_hvif.py): the
+   ROM & NVRAM page's icon (the Machine page has the application's). */
 resource(205, "machine") #'VICN' import "artwork/icons/Machine.hvif";

@@ -383,11 +383,13 @@ PpcCpu::_FetchSlow(u32 address, u32& instruction)
 	const SoftTlbEntry& cached
 		= fCurFetch[(address >> 12) & (kSoftTlbSize - 1)];
 	if (cached.tag == ((address & ~0xfffu) | fSoftGen)) {
+		fStats.fetchPages++;
 		fFetchTag = address & ~0xfffu;
 		fFetchHost = cached.host;
 		instruction = LoadBE32(cached.host + (address & 0xfff));
 		return true;
 	}
+	fStats.softMisses[2]++;
 	u32 pa;
 	u32 wimg;
 	bool viaPageTable;
@@ -417,6 +419,7 @@ void
 PpcCpu::_EnterException(u32 vector, u32 srr0, u32 srr1High, bool tgpr)
 {
 	fExceptions++;
+	fStats.exceptions[(vector >> 8) & 31]++;
 	fSrr0 = srr0;
 	fSrr1 = (srr1High & 0xffff0000) | (fMsr & 0xffff);
 	u32 msr = fMsr & (MSR_ME | MSR_IP | MSR_ILE);
@@ -841,6 +844,7 @@ PpcCpu::BusMapChanged()
 void
 PpcCpu::_FlushSoftTlb()
 {
+	fStats.flushes++;
 	if (++fSoftGen >= 0xfff) {
 		memset(fSoftRead, 0xff, sizeof(fSoftRead));
 		memset(fSoftWrite, 0xff, sizeof(fSoftWrite));
@@ -1074,6 +1078,7 @@ PpcCpu::_ReadSlow(u32 ea, int size, u64& value)
 	if (offset + size > 0x1000) {
 		u32 pa1;
 		u32 pa2;
+		fStats.crossPage++;
 		if (!_AccessCrossesPage(ea, size, kRead, pa1, pa2))
 			return false;
 		fBus.SetCurrentPc(fConfig.index, cia);
@@ -1087,6 +1092,7 @@ PpcCpu::_ReadSlow(u32 ea, int size, u64& value)
 		return true;
 	}
 
+	fStats.softMisses[0]++;
 	u32 pa;
 	u32 wimg;
 	bool viaPageTable;
@@ -1107,6 +1113,7 @@ PpcCpu::_ReadSlow(u32 ea, int size, u64& value)
 		}
 		return true;
 	}
+	fStats.deviceAccesses++;
 	fBus.SetCurrentPc(fConfig.index, cia);
 	switch (size) {
 		case 1: value = fBus.Read8(pa, fConfig.index); break;
@@ -1125,6 +1132,7 @@ PpcCpu::_WriteSlow(u32 ea, int size, u64 value)
 	if (offset + size > 0x1000) {
 		u32 pa1;
 		u32 pa2;
+		fStats.crossPage++;
 		if (!_AccessCrossesPage(ea, size, kWrite, pa1, pa2))
 			return false;
 		fBus.SetCurrentPc(fConfig.index, cia);
@@ -1138,6 +1146,7 @@ PpcCpu::_WriteSlow(u32 ea, int size, u64 value)
 		return true;
 	}
 
+	fStats.softMisses[1]++;
 	u32 pa;
 	u32 wimg;
 	bool viaPageTable;
@@ -1159,6 +1168,7 @@ PpcCpu::_WriteSlow(u32 ea, int size, u64 value)
 		fBus.SnoopStore(pa, size, fConfig.index);
 		return true;
 	}
+	fStats.deviceAccesses++;
 	fBus.SetCurrentPc(fConfig.index, cia);
 	switch (size) {
 		case 1: fBus.Write8(pa, (u8)value, fConfig.index); break;

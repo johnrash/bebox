@@ -92,6 +92,7 @@ public:
 
 			// Shared by all profiles
 			int32				scale;			// 1, 2, 0 = fit window
+			int32				fullScreenScale;	// FullScreenScale
 			bool				showLeds;
 			int32				ledStyle;
 			int32				hostKey;		// HostKey: releases the mouse

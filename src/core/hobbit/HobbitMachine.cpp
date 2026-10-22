@@ -625,6 +625,21 @@ HobbitMachine::InstructionCount() const
 }
 
 
+double
+HobbitMachine::NominalInstructionTicks() const
+{
+	return std::max(1.0, kTicksPerCycle * fConfig.cpiPercent / 100.0);
+}
+
+
+void
+HobbitMachine::SetInstructionTicks(u32 ticks)
+{
+	fCpus[0]->SetTicksPerInstruction(ticks);
+	fCpus[1]->SetTicksPerInstruction(ticks);
+}
+
+
 void
 HobbitMachine::SampleLeds(float& left, float& right, float& disk)
 {

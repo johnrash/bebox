@@ -2,11 +2,16 @@
  * BeBox emulator - device tests: the game port A/D converter, the S3
  * Vision864's RAMDAC access, graphics engine and cursor, the Cirrus
  * GD5434's cursor, the NE2000, the SCSI CD-ROM's disc changes, the
- * boot ROM's debug output key and the MPC105's memory banks.
+ * boot ROM's debug output key, the MPC105's memory banks, the threaded
+ * mode's choice of one host thread or two, timers destroyed while armed,
+ * disk image write errors, the log's settings and frames that only pass
+ * on what changed.
  * Copyright 2026, the BeBox emulator authors. MIT License.
  */
 #include "core/board/BootItems.h"
 #include "core/board/Scheduler.h"
+#include "core/Log.h"
+#include "core/board/ThreadGovernor.h"
 #include "core/bus/IoSpace.h"
 #include "core/bus/Mpc105.h"
 #include "core/bus/PciBus.h"
@@ -24,10 +29,12 @@
 #include "core/video/CirrusGd5434.h"
 #include "core/video/S3Vision864.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <memory>
 #include <vector>
 
 #include <unistd.h>
@@ -213,11 +220,14 @@ TestS3Engine()
 class FrameCapture : public VideoSink {
 public:
 	virtual void FrameReady(const u32* pixels, int width, int height,
-		int stride)
+		int stride, int top, int bottom)
 	{
 		fPixels.assign(pixels, pixels + (size_t)stride * height);
 		fWidth = width;
 		fStride = stride;
+		fTop = top;
+		fBottom = bottom;
+		fCalls++;
 	}
 
 	u32 Pixel(int x, int y) const
@@ -228,6 +238,9 @@ public:
 	std::vector<u32> fPixels;
 	int fWidth = 0;
 	int fStride = 0;
+	int fTop = 0;
+	int fBottom = 0;
+	int fCalls = 0;
 };
 
 
@@ -281,6 +294,74 @@ TestS3Cursor()
 }
 
 
+
+
+// A frame passes on only the lines that changed: none when nothing did, a
+// line written, all of them for a palette change, the cursor's lines that
+// look different.
+void
+TestChangedLines()
+{
+	S3Test t;
+	FrameCapture frame;
+	t.fCard.SetVideoSink(&frame);
+	t.Crtc(0x3a, 0x10);				// enhanced mode, 640x480, 8 bpp
+	t.Crtc(0x01, 79);
+	t.Crtc(0x12, 479 & 0xff);
+	t.Crtc(0x07, 0x02);
+	t.Crtc(0x13, 80);
+	t.fIo.Read(0x3da, 1);
+	t.fIo.Write(0x3c0, 0x20, 1);		// display on
+	auto color = [&](u8 index, u8 r, u8 g, u8 b) {
+		t.fIo.Write(0x3c8, index, 1);
+		t.fIo.Write(0x3c9, r, 1);
+		t.fIo.Write(0x3c9, g, 1);
+		t.fIo.Write(0x3c9, b, 1);
+	};
+	color(1, 63, 0, 0);
+	t.fCard.RenderFrame();
+	Check(frame.fCalls == 1 && frame.fTop == 0 && frame.fBottom == 480,
+		"changed lines: the first frame whole");
+	t.fCard.RenderFrame();
+	Check(frame.fCalls == 1, "changed lines: no frame when nothing changed");
+	t.fCard.Vram()[100 * 640 + 5] = 1;
+	t.fCard.RenderFrame();
+	Check(frame.fCalls == 2 && frame.fTop == 100 && frame.fBottom == 101
+		&& frame.Pixel(5, 100) == 0xff0000 && frame.Pixel(6, 100) == 0,
+		"changed lines: a line written");
+	color(1, 0, 63, 0);
+	t.fCard.RenderFrame();
+	Check(frame.fCalls == 3 && frame.fTop == 0 && frame.fBottom == 480
+		&& frame.Pixel(5, 100) == 0x00ff00, "changed lines: a palette change");
+	// the cursor (its pattern past the picture): its first row inverts two
+	// pixels, the rest is clear
+	t.Crtc(0x4c, 0x02);				// pattern at 512 KB
+	t.Crtc(0x4d, 0x00);
+	for (int row = 0; row < 64; row++) {
+		for (int group = 0; group < 4; group++) {
+			// A set (transparent) except row 0's first two pixels: A, B
+			t.fCard.Vram()[0x80000 + row * 16 + group * 4] = 0xff;
+			t.fCard.Vram()[0x80000 + row * 16 + group * 4 + 1] = 0xff;
+		}
+	}
+	t.fCard.Vram()[0x80002] = 0xc0;
+	t.Crtc(0x46, 0x00);				// x = 40
+	t.Crtc(0x47, 40);
+	t.Crtc(0x48, 0x00);				// y = 10
+	t.Crtc(0x49, 10);
+	t.Crtc(0x45, 0x01);
+	t.fCard.RenderFrame();
+	Check(frame.fCalls == 4 && frame.fTop == 10 && frame.fBottom == 11
+		&& frame.Pixel(40, 10) == 0xffffff,
+		"changed lines: the cursor's line that changed");
+	t.Crtc(0x49, 20);				// y = 20
+	t.fCard.RenderFrame();
+	Check(frame.fCalls == 5 && frame.fTop == 10 && frame.fBottom == 21
+		&& frame.Pixel(40, 10) == 0 && frame.Pixel(40, 20) == 0xffffff,
+		"changed lines: the cursor moved");
+	t.fCard.RenderFrame();
+	Check(frame.fCalls == 5, "changed lines: no frame for a cursor at rest");
+}
 
 
 // The cursor patterns are in the last 16 KB of the memory in use: with 4 MB
@@ -848,6 +929,176 @@ TestMemoryBanks()
 	}
 }
 
+
+// A disk image whose writes fail while 'failing' is set.
+class FailingImage : public DiskImage {
+public:
+	virtual u64 Size() const { return 1 << 20; }
+	virtual bool IsReadOnly() const { return false; }
+	virtual bool Read(u64 offset, void* buffer, size_t length)
+		{ memset(buffer, 0, length); return true; }
+	virtual bool Write(u64 offset, const void* buffer, size_t length)
+		{ return !failing; }
+	virtual std::string Path() const { return "/failing.img"; }
+	virtual const char* Format() const { return "raw"; }
+
+	bool failing = true;
+};
+
+
+std::vector<std::string> sStorageErrors;
+
+void
+StorageErrorSink(LogCategory category, LogLevel level, const char* message,
+	void*)
+{
+	if (category == kLogStorage && level == kLogError)
+		sStorageErrors.push_back(message);
+}
+
+
+// A SCSI disk image that cannot be written: BeOS gets a medium error, the
+// log (shown by the app) one error until a write works again.
+void
+TestDiskWriteErrors()
+{
+	FailingImage* image = new FailingImage;
+	ScsiDisk disk(std::unique_ptr<DiskImage>(image), "BeBox", "Disk");
+	disk.Reset();
+	RunScsi(disk, { 0x00, 0, 0, 0, 0, 0 });		// the unit attention
+	ScsiSense(disk);
+	auto write = [&disk]() {
+		ScsiCommand command;
+		memset(command.cdb, 0, sizeof(command.cdb));
+		u8 cdb[10] = { 0x2a, 0, 0, 0, 0, 8, 0, 0, 1, 0 };	// WRITE(10)
+		memcpy(command.cdb, cdb, sizeof(cdb));
+		command.cdbLength = 10;
+		disk.Execute(command);
+		if (command.status != kScsiStatusGood
+			|| command.dataOutLength != 512)
+			return (u8)0xff;
+		disk.DataOut(command, std::vector<u8>(512, 0x55));
+		return command.status;
+	};
+	sStorageErrors.clear();
+	Log::SetSink(StorageErrorSink, nullptr);
+	bool failed = write() == kScsiStatusCheckCondition
+		&& ScsiSense(disk) == 0x30c;
+	write();
+	Check(failed && sStorageErrors.size() == 1
+		&& sStorageErrors[0].find("/failing.img") != std::string::npos,
+		"disk write errors: medium error, logged once");
+	image->failing = false;
+	bool works = write() == kScsiStatusGood;
+	image->failing = true;
+	write();
+	Check(works && sStorageErrors.size() == 2,
+		"disk write errors: logged again after a write worked");
+	Log::SetSink(nullptr, nullptr);
+}
+
+
+// "CATEGORY=LEVEL" settings (the app's and bebox-headless' --log).
+void
+TestLogConfigure()
+{
+	Check(Log::Configure("scsi=info") && Log::Level(kLogScsi) == kLogInfo
+		&& Log::Level(kLogIde) == kLogWarning, "log: a category's level");
+	Check(Log::Configure("ide") && Log::Level(kLogIde) == kLogDebug,
+		"log: debug without a level");
+	Check(!Log::Configure("nonsense=debug"), "log: unknown category");
+	Check(Log::Configure("all=warning") && Log::Level(kLogScsi) == kLogWarning
+		&& Log::Level(kLogIde) == kLogWarning, "log: all categories");
+}
+
+
+// A timer destroyed while armed takes its queue entries with it (the
+// scheduler keeps pointers; AddressSanitizer would see a stale one read).
+void
+TestTimerDestroyed()
+{
+	Scheduler scheduler;
+	int fired = 0;
+	int stayed = 0;
+	Timer staying(scheduler, [&stayed]() { stayed++; }, "staying");
+	staying.Arm(300);
+	{
+		std::unique_ptr<Timer> going(new Timer(scheduler,
+			[&fired]() { fired++; }, "going"));
+		going->Arm(100);
+		going->Arm(200);	// a stale entry too
+	}
+	Check(scheduler.NextEventTime() == 300,
+		"timers: a destroyed timer is not due");
+	scheduler.RunDue(1000);
+	Check(fired == 0 && stayed == 1,
+		"timers: the others still fire, the destroyed one does not");
+}
+
+
+// Threaded mode (ThreadGovernor): one host thread once the two wait for
+// each other longer than two are faster (the speedup a trial measured on
+// a calm host), probes of two threads backing off while they still wait.
+void
+TestThreadGovernor()
+{
+	ThreadGovernor governor;
+	double now = 100;
+	// 1 ms stretches with both CPUs running on two threads that waited
+	// this share of the time
+	auto both = [&](double seconds, double share) {
+		for (int i = 0; i <= (int)(seconds * 1000 + 0.5); i++) {
+			governor.Waited(0.001 * share);
+			now += 0.001;
+			governor.BothRan(now, 0.001);
+			governor.RunEnded(now);
+		}
+	};
+	// a trial: 0.1 ms slices at these instructions per second
+	auto trial = [&](double oneRate, double twoRate) {
+		for (int i = 0; i < 2000 && governor.Timing(); i++) {
+			double rate = governor.TwoThreads() ? twoRate : oneRate;
+			governor.SliceTimed((u64)(rate / 10000), now, now + 0.0001);
+			now += 0.0001;
+		}
+	};
+	auto runEnded = [&](double seconds) {
+		now += seconds;
+		governor.RunEnded(now);
+	};
+
+	Check(governor.TwoThreads() && !governor.Timing(),
+		"threads: two at first");
+	both(0.2, 0.01);
+	Check(governor.Timing(), "threads: a trial while the threads hardly "
+		"wait");
+	trial(100e6, 150e6);
+	Check(governor.TwoThreads() && !governor.Timing()
+		&& std::fabs(governor.Speedup() - 1.5) < 0.01,
+		"threads: the trial measures the speedup (1.5), two threads");
+	// break-even: waiting a third of the time
+	both(0.2, 0.25);
+	Check(governor.TwoThreads(), "threads: two while waiting 25%");
+	both(0.2, 0.5);
+	Check(!governor.TwoThreads(), "threads: one when waiting 50%");
+	runEnded(0.5);
+	Check(!governor.TwoThreads(), "threads: no probe after 0.5 s");
+	runEnded(0.6);
+	Check(governor.TwoThreads(), "threads: a probe of two after 1 s");
+	both(0.06, 0.5);
+	Check(!governor.TwoThreads(), "threads: one after a probe waiting "
+		"50%");
+	runEnded(1.1);
+	Check(!governor.TwoThreads(), "threads: no probe 1 s later");
+	runEnded(1);
+	Check(governor.TwoThreads(), "threads: the next probe after 2 s");
+	both(0.06, 0.1);
+	Check(governor.TwoThreads() && !governor.Timing(),
+		"threads: two after a probe waiting 10%");
+	both(0.3, 0.1);
+	Check(governor.TwoThreads(), "threads: two keep waiting 10%");
+}
+
 }	// namespace
 
 
@@ -861,10 +1112,15 @@ main()
 	TestS3Dac();
 	TestS3Engine();
 	TestS3Cursor();
+	TestChangedLines();
 	TestCirrusCursor();
 	TestCdChange();
 	TestDebugKeyRelease();
 	TestMemoryBanks();
+	TestThreadGovernor();
+	TestTimerDestroyed();
+	TestDiskWriteErrors();
+	TestLogConfigure();
 	printf("%d failures\n", sFailures);
 	return sFailures == 0 ? 0 : 1;
 }

@@ -41,6 +41,13 @@ public:
 		u32 pitch = 0;			// bytes per line
 		int pixelDoubling = 1;	// horizontal (mode 13h)
 		int lineRepeat = 1;		// vertical (double scan / max scan line)
+
+		bool operator==(const DisplayMode& other) const
+			{ return format == other.format && width == other.width
+				&& height == other.height && start == other.start
+				&& pitch == other.pitch
+				&& pixelDoubling == other.pixelDoubling
+				&& lineRepeat == other.lineRepeat; }
 	};
 
 								VgaCore(Scheduler& scheduler,
@@ -63,8 +70,8 @@ public:
 			u8					LegacyRead(u32 offset);
 			void				LegacyWrite(u32 offset, u8 value);
 
-			// Renders the current frame into fFrame and passes it to the
-			// sink. Normally called by the retrace timer.
+			// Renders the current frame into fFrame and passes what changed
+			// to the sink. Normally called by the retrace timer.
 			void				RenderFrame();
 			const DisplayMode&	CurrentMode() const { return fMode; }
 			// Position of a visible hardware cursor (its hot spot is the
@@ -87,9 +94,13 @@ protected:
 	virtual	void				DacMaskWrite(u8 value) { fDacMask = value; }
 	// Bank offset for legacy window accesses (Cirrus offset registers).
 	virtual	u32					LegacyBankOffset(u32 offset) { return 0; }
-	// Overlays (hardware cursor) drawn on the rendered frame.
+	// Overlays (hardware cursor) drawn on the rendered frame, and the lines
+	// they cover (top to bottom - 1, within the picture's height).
 	virtual	void				DrawOverlays(u32* frame, int width,
 									int height, int stride) {}
+	virtual	bool				OverlayLines(int height, int& top,
+									int& bottom) const
+									{ return false; }
 	// The 256 entry palette as 0x00RRGGBB.
 			u32					PaletteColor(int index) const;
 
@@ -99,6 +110,13 @@ protected:
 			int					_StandardLineRepeat() const;
 
 			void				_Retrace();
+			void				_RenderAll(const DisplayMode& mode, int width,
+									int height);
+			void				_ConvertLine(PixelFormat format, const u8* in,
+									u32* out, int width,
+									const u32* palette);
+			void				_Show(int width, int height, int top,
+									int bottom);
 
 			Scheduler&			fScheduler;
 			u64					fTicksPerSecond;
@@ -106,6 +124,20 @@ protected:
 			std::vector<u8>		fVram;
 			std::vector<u32>	fFrame;
 			DisplayMode			fMode;
+			// The packed pixel modes: what the last frame converted (the
+			// lines of video memory, the palette), the picture without
+			// overlays, the lines the overlays covered.
+			enum Shown { kShownNothing, kShownBlack, kShownWhole, kShownLines };
+			Shown				fShown = kShownNothing;
+			int					fFrameWidth = 0;
+			int					fFrameHeight = 0;
+			std::vector<u8>		fShadow;
+			DisplayMode			fShadowMode;
+			u32					fShadowPalette[256];
+			std::vector<u32>	fBase;
+			std::vector<u32>	fOverlayScratch;
+			int					fOverlayTop = 0;
+			int					fOverlayBottom = 0;
 			std::unique_ptr<Timer> fRetraceTimer;
 			u64					fFrameStart;
 			u64					fFrameTicks;

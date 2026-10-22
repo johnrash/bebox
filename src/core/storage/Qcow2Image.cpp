@@ -536,15 +536,16 @@ Qcow2Image::_SetRefcount(u64 cluster, u64 refcount)
 	if (blockOffset == 0) {
 		// A new reference count block at the end of the file; it counts
 		// itself once it is in the table.
-		blockOffset = fFileEnd;
-		fFileEnd += fClusterSize;
-		std::vector<u8>& block = fRefcountCache[blockOffset];
-		block.assign(fClusterSize, 0);
-		if (!_WriteAt(blockOffset, block.data(), fClusterSize))
+		std::vector<u8> zeros(fClusterSize, 0);
+		if (!_Append(zeros.data(), blockOffset))
 			return false;
+		if (!_WriteU64(fRefcountTableOffset + tableIndex * 8,
+				blockOffset)) {
+			_Unappend(blockOffset);
+			return false;
+		}
 		fRefcountTable[tableIndex] = blockOffset;
-		if (!_WriteU64(fRefcountTableOffset + tableIndex * 8, blockOffset))
-			return false;
+		fRefcountCache[blockOffset] = zeros;
 		if (!_SetRefcount(blockOffset >> fClusterBits, 1))
 			return false;
 	}
@@ -552,12 +553,17 @@ Qcow2Image::_SetRefcount(u64 cluster, u64 refcount)
 	if (block == nullptr)
 		return false;
 	u32 index = (u32)(cluster % fRefcountsPerBlock);
+	u64 old = _RefcountOf(block->data(), index);
 	_StoreRefcount(block->data(), index, refcount);
 	// write back the bytes holding the entry
 	u32 bits = 1u << fRefcountOrder;
 	u32 byte = (u32)((u64)index * bits / 8);
 	u32 bytes = std::max<u32>(1, bits / 8);
-	return _WriteAt(blockOffset + byte, block->data() + byte, bytes);
+	if (!_WriteAt(blockOffset + byte, block->data() + byte, bytes)) {
+		_StoreRefcount(block->data(), index, old);
+		return false;
+	}
+	return true;
 }
 
 
@@ -571,55 +577,108 @@ Qcow2Image::_GrowRefcountTable(u64 neededIndex)
 	entries = clusters * fClusterSize / 8;
 	u64 oldOffset = fRefcountTableOffset;
 	u64 oldClusters = fRefcountTableClusters;
+	u64 oldEnd = fFileEnd;
+	std::vector<u64> oldTable = fRefcountTable;
 	u64 newOffset = fFileEnd;
 	fFileEnd += clusters * fClusterSize;
 	fRefcountTable.resize(entries, 0);
 
 	// Reference counts of the new table: blocks created meanwhile are
-	// entered into the old table location, which is only valid for the
-	// old size, so the table is written as a whole afterwards.
-	u64 savedTableOffset = fRefcountTableOffset;
+	// entered into the new table's location (for the part the old table
+	// covered too), so the table is written as a whole afterwards.
 	fRefcountTableOffset = newOffset;
+	// Until the header points to the new table, nothing on disk refers to
+	// what was written past the old end: a failure drops it.
+	auto undo = [&]() {
+		int error = errno;
+		if (ftruncate(fFd, (off_t)oldEnd) == 0)
+			fFileEnd = oldEnd;
+		fRefcountTableOffset = oldOffset;
+		fRefcountTable = oldTable;
+		for (auto it = fRefcountCache.begin(); it != fRefcountCache.end(); ) {
+			if (it->first >= oldEnd)
+				it = fRefcountCache.erase(it);
+			else
+				++it;
+		}
+		errno = error;
+		return false;
+	};
 	std::vector<u8> raw(clusters * fClusterSize, 0);
 	if (!_WriteAt(newOffset, raw.data(), raw.size()))
-		return false;
+		return undo();
 	for (u64 i = 0; i < clusters; i++) {
 		if (!_SetRefcount((newOffset >> fClusterBits) + i, 1))
-			return false;
+			return undo();
 	}
 	for (u64 i = 0; i < fRefcountTable.size(); i++)
 		StoreBE64(&raw[i * 8], fRefcountTable[i]);
 	if (!_WriteAt(newOffset, raw.data(), raw.size()))
-		return false;
+		return undo();
 	fsync(fFd);
 	// switch the header to the new table
 	u8 header[12];
 	StoreBE64(header, newOffset);
 	StoreBE32(header + 8, (u32)clusters);
 	if (!_WriteAt(48, header, 12))
-		return false;
+		return undo();
 	fRefcountTableClusters = (u32)clusters;
-	(void)savedTableOffset;
 	for (u64 i = 0; i < oldClusters; i++)
 		_SetRefcount((oldOffset >> fClusterBits) + i, 0);
 	return true;
 }
 
 
-u64
-Qcow2Image::_AllocateCluster()
+// Writes a cluster at the end of the file (not counted yet). A write that
+// fails (a full disk) leaves the file as it was.
+bool
+Qcow2Image::_Append(const u8* cluster, u64& offset)
 {
-	u64 offset = fFileEnd;
+	offset = fFileEnd;
+	if (!_WriteAt(offset, cluster, fClusterSize)) {
+		int error = errno;
+		if (ftruncate(fFd, (off_t)offset) != 0) {
+			// what was written stays; allocate after it
+			fFileEnd += fClusterSize;
+		}
+		errno = error;
+		return false;
+	}
 	fFileEnd += fClusterSize;
-	if (!_SetRefcount(offset >> fClusterBits, 1))
-		return 0;
-	return offset;
+	return true;
+}
+
+
+// Takes back the cluster _Append() wrote last when it cannot be counted
+// (nothing refers to it yet).
+void
+Qcow2Image::_Unappend(u64 offset)
+{
+	if (offset + fClusterSize == fFileEnd
+		&& ftruncate(fFd, (off_t)offset) == 0)
+		fFileEnd = offset;
+}
+
+
+// Drops one reference to a cluster (once nothing on disk refers to it
+// through the reference being dropped).
+void
+Qcow2Image::_Release(u64 cluster)
+{
+	u64 count;
+	if (_GetRefcount(cluster, count) && count > 0)
+		_SetRefcount(cluster, count - 1);
 }
 
 
 // #pragma mark - writing
 
 
+// A new cluster (an L2 table or data) is written at the end of the file,
+// counted, then entered into the table that refers to it, on disk and then
+// in memory; the cluster it replaces is released last. A write that fails
+// (a full disk) leaves the image consistent: at worst a cluster nothing
+// refers to stays counted (a leak, as with QEMU).
 bool
 Qcow2Image::_WriteCluster(u64 guestCluster, u32 inCluster, const u8* buffer,
 	u32 length)
@@ -632,41 +691,44 @@ Qcow2Image::_WriteCluster(u64 guestCluster, u32 inCluster, const u8* buffer,
 	u64 l2Offset = l1Entry & kOffsetMask;
 	if (l2Offset == 0 || (l1Entry & kCopied) == 0) {
 		// new L2 table, or a private copy of one shared with a snapshot
-		u64 newL2 = _AllocateCluster();
-		if (newL2 == 0)
-			return false;
 		std::vector<u64> entries(fL2Entries, 0);
 		if (l2Offset != 0) {
 			std::vector<u64>* shared = _L2Table(l2Offset);
 			if (shared == nullptr)
 				return false;
 			entries = *shared;
+		}
+		std::vector<u8> raw(fClusterSize);
+		for (u32 i = 0; i < fL2Entries; i++)
+			StoreBE64(&raw[i * 8], entries[i]);
+		u64 newL2;
+		if (!_Append(raw.data(), newL2))
+			return false;
+		if (!_SetRefcount(newL2 >> fClusterBits, 1)) {
+			_Unappend(newL2);
+			return false;
+		}
+		if (l2Offset != 0) {
 			// the data clusters gain a reference from the copy
 			for (u64 entry : entries) {
 				u64 data = entry & kOffsetMask;
 				if (data != 0 && (entry & kCompressed) == 0) {
 					u64 count;
-					_GetRefcount(data >> fClusterBits, count);
-					_SetRefcount(data >> fClusterBits, count + 1);
+					if (!_GetRefcount(data >> fClusterBits, count)
+						|| !_SetRefcount(data >> fClusterBits, count + 1))
+						return false;
 				}
 			}
 		}
-		std::vector<u8> raw(fClusterSize);
-		for (u32 i = 0; i < fL2Entries; i++)
-			StoreBE64(&raw[i * 8], entries[i]);
-		if (!_WriteAt(newL2, raw.data(), raw.size()))
+		if (!_WriteU64(fL1Offset + l1Index * 8, newL2 | kCopied)) {
+			_SetRefcount(newL2 >> fClusterBits, 0);
 			return false;
-		fL2Cache[newL2] = entries;
-		if (l2Offset != 0) {
-			u64 count;
-			_GetRefcount(l2Offset >> fClusterBits, count);
-			if (count > 0)
-				_SetRefcount(l2Offset >> fClusterBits, count - 1);
 		}
-		l2Offset = newL2;
 		fL1[l1Index] = newL2 | kCopied;
-		if (!_WriteU64(fL1Offset + l1Index * 8, fL1[l1Index]))
-			return false;
+		fL2Cache[newL2] = entries;
+		if (l2Offset != 0)
+			_Release(l2Offset >> fClusterBits);
+		l2Offset = newL2;
 	}
 	std::vector<u64>* table = _L2Table(l2Offset);
 	if (table == nullptr)
@@ -691,11 +753,24 @@ Qcow2Image::_WriteCluster(u64 guestCluster, u32 inCluster, const u8* buffer,
 			return false;
 	}
 	memcpy(cluster.data() + inCluster, buffer, length);
-	u64 target = inPlace ? dataOffset : _AllocateCluster();
-	if (target == 0)
+	u64 target = dataOffset;
+	if (inPlace) {
+		if (!_WriteAt(target, cluster.data(), fClusterSize))
+			return false;
+	} else {
+		if (!_Append(cluster.data(), target))
+			return false;
+		if (!_SetRefcount(target >> fClusterBits, 1)) {
+			_Unappend(target);
+			return false;
+		}
+	}
+	if (!_WriteU64(l2Offset + (u64)l2Index * 8, target | kCopied)) {
+		if (!inPlace)
+			_SetRefcount(target >> fClusterBits, 0);
 		return false;
-	if (!_WriteAt(target, cluster.data(), fClusterSize))
-		return false;
+	}
+	(*table)[l2Index] = target | kCopied;
 	if (!inPlace) {
 		// drop the reference to the old cluster(s)
 		if (compressed) {
@@ -707,21 +782,12 @@ Qcow2Image::_WriteCluster(u64 guestCluster, u32 inCluster, const u8* buffer,
 			u64 end = (hostOffset & ~511ULL) + sectors * 512;
 			u64 first = hostOffset >> fClusterBits;
 			u64 last = (end - 1) >> fClusterBits;
-			for (u64 c = first; c <= last; c++) {
-				u64 count;
-				_GetRefcount(c, count);
-				if (count > 0)
-					_SetRefcount(c, count - 1);
-			}
-		} else if (dataOffset != 0) {
-			u64 count;
-			_GetRefcount(dataOffset >> fClusterBits, count);
-			if (count > 0)
-				_SetRefcount(dataOffset >> fClusterBits, count - 1);
-		}
+			for (u64 c = first; c <= last; c++)
+				_Release(c);
+		} else if (dataOffset != 0)
+			_Release(dataOffset >> fClusterBits);
 	}
-	(*table)[l2Index] = target | kCopied;
-	return _WriteU64(l2Offset + (u64)l2Index * 8, (*table)[l2Index]);
+	return true;
 }
 
 

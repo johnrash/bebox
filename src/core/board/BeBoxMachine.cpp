@@ -7,6 +7,7 @@
 #include "BeBoxBoard.h"
 #include "BootItems.h"
 #include "Flash29F0x0.h"
+#include "ThreadGovernor.h"
 #include "../Log.h"
 #include "../Spin.h"
 #include "../bus/IoSpace.h"
@@ -30,6 +31,7 @@
 #include "../video/S3Vision864.h"
 
 #include <algorithm>
+#include <cinttypes>
 #include <cstdio>
 #include <condition_variable>
 #include <cstring>
@@ -71,17 +73,29 @@ WriteFile(const std::string& path, const void* data, size_t size)
 
 // Threaded mode: the worker thread runs CPU 1 through the time slices
 // the machine starts (generation numbers), spinning between them for a
-// while, then sleeping.
+// while, then sleeping. The governor chooses whether the slices in which
+// both CPUs run go to the worker or stay on the machine's thread.
 struct BeBoxMachine::Worker {
 	std::thread					thread;
 	u64							sliceEnd = 0;
+	// The slice follows one on both threads: a long wait for it was the
+	// machine's thread being slow (written before start).
+	bool						continued = false;
+	// When the worker waited for the slice (beyond a short spin; 0: it
+	// did not) and noticed it (written before done).
+	double						waitStart = 0;
+	double						waitEnd = 0;
 	std::atomic<u64>			start{0};		// slice generation to run
 	std::atomic<u64>			done{0};		// last generation run
 	std::atomic<bool>			sleeping{false};
 	std::atomic<bool>			quit{false};
 	std::mutex					lock;
 	std::condition_variable		wake;
+	ThreadGovernor				governor;
 };
+
+// A wait for the other thread longer than this many spins is timed.
+static const int kWaitSpins = 256;
 
 
 BeBoxMachine::BeBoxMachine(const MachineConfig& config)
@@ -393,15 +407,19 @@ BeBoxMachine::_RunWorker()
 	u64 seen = 0;
 	while (true) {
 		u64 generation = 0;
+		double waitStart = 0;
 		for (int spins = 0;; spins++) {
 			generation = worker.start.load(std::memory_order_acquire);
 			if (generation != seen || worker.quit)
 				break;
+			if (spins == kWaitSpins && waitStart == 0)
+				waitStart = ThreadGovernor::HostSeconds();
 			if (spins < 2000) {
 				CpuRelax();
 				continue;
 			}
-			// idle (the emulation paused or paced): sleep
+			// idle (the emulation paused or paced, or both CPUs on the
+			// machine's thread): sleep
 			std::unique_lock<std::mutex> lock(worker.lock);
 			worker.sleeping = true;
 			worker.wake.wait(lock, [&]() {
@@ -413,6 +431,9 @@ BeBoxMachine::_RunWorker()
 		if (worker.quit)
 			break;
 		seen = generation;
+		worker.waitStart = worker.continued ? waitStart : 0;
+		if (worker.waitStart > 0)
+			worker.waitEnd = ThreadGovernor::HostSeconds();
 		cpu.Run(worker.sliceEnd);
 		worker.done.store(generation, std::memory_order_release);
 	}
@@ -420,13 +441,40 @@ BeBoxMachine::_RunWorker()
 }
 
 
-// Both CPUs run to the end of the slice at the same time; then the
-// devices run (RunFor) with the worker waiting.
+// Both CPUs run to the end of the slice: at the same time, CPU 1 on the
+// worker thread, or one after the other on this thread, as the governor
+// chooses. Returns whether the slice ran on both threads.
+bool
+BeBoxMachine::_RunSliceThreaded(u64 sliceEnd, bool continued)
+{
+	ThreadGovernor& governor = fWorker->governor;
+	bool twoThreads = governor.TwoThreads();
+	if (!governor.Timing()) {
+		if (twoThreads)
+			_HandOver(sliceEnd, continued);
+		else
+			_RunSliceOneThread(sliceEnd);
+		return twoThreads;
+	}
+	u64 instructions = InstructionCount();
+	double start = ThreadGovernor::HostSeconds();
+	if (twoThreads)
+		_HandOver(sliceEnd, continued);
+	else
+		_RunSliceOneThread(sliceEnd);
+	governor.SliceTimed(InstructionCount() - instructions, start,
+		ThreadGovernor::HostSeconds());
+	return twoThreads;
+}
+
+
+// CPU 1 runs on the worker thread while CPU 0 runs here.
 void
-BeBoxMachine::_RunSliceThreaded(u64 sliceEnd)
+BeBoxMachine::_HandOver(u64 sliceEnd, bool continued)
 {
 	Worker& worker = *fWorker;
 	worker.sliceEnd = sliceEnd;
+	worker.continued = continued;
 	u64 generation = worker.start.load() + 1;
 	worker.start.store(generation);
 	if (worker.sleeping) {
@@ -436,14 +484,51 @@ BeBoxMachine::_RunSliceThreaded(u64 sliceEnd)
 	fScheduler.SetClock(fCpus[0]->NowPointer());
 	fCpus[0]->Run(sliceEnd);
 	fScheduler.SetClock(nullptr);
+	double waitStart = 0;
 	for (int spins = 0;
 			worker.done.load(std::memory_order_acquire) != generation;
 			spins++) {
+		if (spins == kWaitSpins)
+			waitStart = ThreadGovernor::HostSeconds();
 		if (spins < 100000)
 			CpuRelax();
 		else
 			std::this_thread::yield();
 	}
+	// The time either thread waited (while the worker was slow to notice
+	// the slice, both did: counted once).
+	double waitEnd = waitStart > 0 ? ThreadGovernor::HostSeconds() : 0;
+	double waited = waitEnd - waitStart;
+	if (worker.waitStart > 0) {
+		waited += worker.waitEnd - worker.waitStart;
+		if (waitStart > 0) {
+			waited -= std::max(0.0, std::min(worker.waitEnd, waitEnd)
+				- std::max(worker.waitStart, waitStart));
+		}
+	}
+	if (waited > 0)
+		worker.governor.Waited(waited);
+}
+
+
+// Both CPUs ran since 'start': tells the governor, returns the time.
+double
+BeBoxMachine::_BothRan(double start)
+{
+	double now = ThreadGovernor::HostSeconds();
+	fWorker->governor.BothRan(now, now - start);
+	return now;
+}
+
+
+void
+BeBoxMachine::_RunSliceOneThread(u64 sliceEnd)
+{
+	for (auto& cpu : fCpus) {
+		fScheduler.SetClock(cpu->NowPointer());
+		cpu->Run(sliceEnd);
+	}
+	fScheduler.SetClock(nullptr);
 }
 
 
@@ -736,6 +821,8 @@ void
 BeBoxMachine::RunFor(u64 ticks)
 {
 	u64 target = fNow + ticks;
+	bool twoThreads = false;	// the last slice ran on both threads
+	double bothStart = 0;		// both CPUs run since (host time)
 	while (fNow < target) {
 		u64 sliceEnd = std::min(target, fNow + fQuantum);
 		u64 next = fScheduler.NextEventTime();
@@ -745,22 +832,46 @@ BeBoxMachine::RunFor(u64 ticks)
 			if (cpu->Now() < fNow)
 				cpu->SetNow(fNow);
 		}
+		RunProfile* profile = fProfile.get();
+		double start = profile != nullptr ? ThreadGovernor::HostSeconds() : 0;
+		bool bothRunning = fCpus.size() == 2 && !fCpus[0]->IsHalted()
+			&& !fCpus[1]->IsHalted();
 		// A CPU in reset or dozing does next to nothing: then the other
 		// one runs on this thread too, without waiting for the worker.
-		if (fWorker && !fCpus[0]->IsHalted() && !fCpus[1]->IsHalted())
-			_RunSliceThreaded(sliceEnd);
-		else {
-			for (auto& cpu : fCpus) {
-				fScheduler.SetClock(cpu->NowPointer());
-				cpu->Run(sliceEnd);
-			}
-			fScheduler.SetClock(nullptr);
+		if (fWorker && bothRunning) {
+			if (bothStart == 0)
+				bothStart = ThreadGovernor::HostSeconds();
+			twoThreads = _RunSliceThreaded(sliceEnd, twoThreads);
+		} else {
+			if (bothStart != 0)
+				_BothRan(bothStart);
+			bothStart = 0;
+			_RunSliceOneThread(sliceEnd);
+			twoThreads = false;
+		}
+		double ran = 0;
+		if (profile != nullptr) {
+			ran = ThreadGovernor::HostSeconds();
+			profile->slices++;
+			profile->bothRunning += bothRunning ? 1 : 0;
+			if (twoThreads) {
+				profile->twoThreads += ran - start;
+				profile->twoThreadSlices++;
+			} else
+				profile->oneThread += ran - start;
 		}
 		fNow = sliceEnd;
 		fScheduler.SetNow(fNow);
 		fScheduler.RunDue(fNow);
 		if (fPowerOnRequested.exchange(false))
 			PowerOn();
+		if (profile != nullptr)
+			profile->devices += ThreadGovernor::HostSeconds() - ran;
+	}
+	if (fWorker) {
+		double now = bothStart != 0 ? _BothRan(bothStart)
+			: ThreadGovernor::HostSeconds();
+		fWorker->governor.RunEnded(now);
 	}
 }
 
@@ -772,6 +883,23 @@ BeBoxMachine::InstructionCount() const
 	for (const auto& cpu : fCpus)
 		count += cpu->InstructionCount();
 	return count;
+}
+
+
+double
+BeBoxMachine::NominalInstructionTicks() const
+{
+	double ticksPerCycle = fConfig.model == MachineConfig::kBeBox133 ? 2 : 4;
+	return std::max(1.0, ticksPerCycle * fConfig.cpiPercent / 100.0);
+}
+
+
+void
+BeBoxMachine::SetInstructionTicks(u32 ticks)
+{
+	// between time slices: the worker thread is waiting
+	for (auto& cpu : fCpus)
+		cpu->SetTicksPerInstruction(ticks);
 }
 
 
@@ -793,6 +921,100 @@ u64
 BeBoxMachine::UnclaimedIoCount() const
 {
 	return fIo->UnclaimedCount();
+}
+
+
+void
+BeBoxMachine::SetProfiling(bool profiling)
+{
+	fProfile.reset(profiling ? new RunProfile : nullptr);
+	if (fProfile)
+		fProfile->since = fNow;
+	fScheduler.SetProfiling(profiling);
+}
+
+
+// Where the host's time went while profiling, and what the processors'
+// slow paths and the devices' timers did.
+std::string
+BeBoxMachine::Statistics() const
+{
+	static const char* const kExceptions[32] = {
+		nullptr, "reset", "machine check", "DSI", "ISI", "external",
+		"alignment", "program", "FP unavailable", "decrementer", nullptr,
+		nullptr, "system call", "trace", nullptr, nullptr, "ITLB miss",
+		"DTLB load miss", "DTLB store miss", "breakpoint", "SMI" };
+	std::string text;
+	char line[256];
+	if (fProfile) {
+		const RunProfile& p = *fProfile;
+		double total = p.oneThread + p.twoThreads + p.devices;
+		auto share = [total](double seconds) {
+			return total > 0 ? 100 * seconds / total : 0;
+		};
+		double emulated = (fNow - p.since) / (double)fTicksPerSecond;
+		snprintf(line, sizeof(line), "run loop: %.3f s for %.3f emulated s "
+			"(%.0f%%): processors on one thread %.3f s (%.0f%%), on two "
+			"%.3f s (%.0f%%), devices' timers %.3f s (%.0f%%)\n", total,
+			emulated, total > 0 ? 100 * emulated / total : 0, p.oneThread,
+			share(p.oneThread), p.twoThreads, share(p.twoThreads),
+			p.devices, share(p.devices));
+		text += line;
+		snprintf(line, sizeof(line), "slices: %" PRIu64 ", both processors "
+			"running in %" PRIu64 ", on two threads %" PRIu64 "\n", p.slices,
+			p.bothRunning, p.twoThreadSlices);
+		text += line;
+	}
+	if (fWorker) {
+		const ThreadGovernor& governor = fWorker->governor;
+		const ThreadGovernor::Counts& counts = governor.GetCounts();
+		snprintf(line, sizeof(line), "threads: now %s, speedup %.2f; %d "
+			"trials, %d probes, %d switches to one thread, %d back\n",
+			governor.TwoThreads() ? "two" : "one", governor.Speedup(),
+			counts.trials, counts.probes, counts.toOne, counts.toTwo);
+		text += line;
+	}
+	for (size_t i = 0; i < fCpus.size(); i++) {
+		const PpcCpu& cpu = *fCpus[i];
+		const PpcCpu::Stats& s = cpu.GetStats();
+		double thousands = std::max<double>(1, cpu.InstructionCount()) / 1000;
+		snprintf(line, sizeof(line), "cpu%zu: %.1f M instructions; per 1000: "
+			"translations read %.2f, write %.2f, fetch %.2f, fetch page "
+			"changes %.2f, device accesses %.2f, across pages %.3f; %" PRIu64
+			" flushes\n", i, cpu.InstructionCount() / 1e6,
+			s.softMisses[0] / thousands, s.softMisses[1] / thousands,
+			s.softMisses[2] / thousands, s.fetchPages / thousands,
+			s.deviceAccesses / thousands, s.crossPage / thousands,
+			s.flushes);
+		text += line;
+		std::string exceptions;
+		for (int v = 0; v < 32; v++) {
+			if (s.exceptions[v] == 0)
+				continue;
+			snprintf(line, sizeof(line), "%s%s %" PRIu64,
+				exceptions.empty() ? "" : ", ",
+				kExceptions[v] != nullptr ? kExceptions[v] : "?",
+				s.exceptions[v]);
+			exceptions += line;
+		}
+		if (!exceptions.empty())
+			text += "  exceptions: " + exceptions + "\n";
+	}
+	const auto& timers = fScheduler.Profile();
+	if (!timers.empty()) {
+		std::vector<std::pair<double, std::string> > sorted;
+		for (const auto& item : timers) {
+			snprintf(line, sizeof(line), "  %-24s %8.3f s %10" PRIu64
+				" calls\n", item.first.c_str(), item.second.seconds,
+				item.second.calls);
+			sorted.push_back(std::make_pair(item.second.seconds, line));
+		}
+		std::sort(sorted.rbegin(), sorted.rend());
+		text += "timers (host time):\n";
+		for (const auto& item : sorted)
+			text += item.second;
+	}
+	return text;
 }
 
 

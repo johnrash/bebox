@@ -9,9 +9,21 @@
 #include "../board/Machine.h"
 #include "../video/VgaCore.h"
 
+#include <algorithm>
 #include <chrono>
 
 namespace bebox {
+
+// The processors' speed control (factors of the model's speed) above a
+// real BeBox: slower while the emulation falls behind real time with busy
+// processors (not while it catches up), faster again (up to the limit)
+// while it waits for real time. Never slower than the setting or a real
+// BeBox: BeOS's sound (an MP3 decoder) needs every instruction it gets in
+// an emulated second, so below that the host's lag slows time instead.
+static const double kBehind = 0.005;		// s
+static const double kSlower = 0.97;			// per 1 ms run
+static const double kFaster = 1.01;
+
 
 EmulatorThread::EmulatorThread()
 	:
@@ -77,6 +89,14 @@ EmulatorThread::Post(Command command)
 
 
 void
+EmulatorThread::DiscardCommands()
+{
+	std::lock_guard<std::mutex> lock(fLock);
+	fCommands.clear();
+}
+
+
+void
 EmulatorThread::SetPaused(bool paused)
 {
 	fPaused = paused;
@@ -106,10 +126,22 @@ EmulatorThread::_Run()
 	u64 emulatedStart = machine.Now();
 	u64 nextLeds = machine.Now() + ledPeriod;
 	u64 nextSave = machine.Now() + savePeriod;
+	std::string saveError;
 	Clock::time_point statsTime = realStart;
 	u64 statsEmulated = machine.Now();
 	u64 statsInstructions = machine.InstructionCount();
 	int lastLimit = fSpeedLimit;
+
+	// An instruction takes nominal / speed ticks; the fraction carries
+	// over to the next run.
+	const double nominalTicks = machine.NominalInstructionTicks();
+	const int cpus = std::max(1, machine.CpuCount());
+	double speed = 1.0;
+	double tickCarry = 0;
+	u32 instructionTicks = 0;
+	double speedSum = 0;
+	int speedRuns = 0;
+	double lastLead = 0;
 
 	while (!fQuit) {
 		std::vector<Command> commands;
@@ -133,7 +165,25 @@ EmulatorThread::_Run()
 		if (fPaused)
 			continue;
 
+		int limit = fSpeedLimit;
+		// as fast as possible: an instruction a tick
+		double maxSpeed = limit > 0 ? limit / 100.0 : nominalTicks;
+		double minSpeed = std::min(1.0, maxSpeed);
+		speed = std::max(minSpeed, std::min(speed, maxSpeed));
+		tickCarry += nominalTicks / speed;
+		u32 ticks = std::max<u32>(1, (u32)tickCarry);
+		tickCarry = std::max(0.0, tickCarry - ticks);
+		if (ticks != instructionTicks) {
+			machine.SetInstructionTicks(ticks);
+			instructionTicks = ticks;
+		}
+		u64 instructionsBefore = machine.InstructionCount();
 		machine.RunFor(slice);
+		// the share of the run the processors were not dozing
+		double busy = (machine.InstructionCount() - instructionsBefore)
+			* (double)ticks / ((double)slice * cpus);
+		speedSum += speed;
+		speedRuns++;
 
 		if (machine.Now() >= nextLeds) {
 			nextLeds += ledPeriod;
@@ -159,41 +209,53 @@ EmulatorThread::_Run()
 		if (machine.Now() >= nextSave) {
 			nextSave += savePeriod;
 			std::string error;
-			machine.SavePersistentState(error);
+			// logged once until it works again or fails otherwise
+			if (machine.SavePersistentState(error))
+				saveError.clear();
+			else if (error != saveError) {
+				BB_LOG(kLogHost, kLogError, "%s", error.c_str());
+				saveError = error;
+			}
 		}
 
-		// Pacing
-		int limit = fSpeedLimit;
+		// Pacing: emulated time follows real time
 		if (limit != lastLimit) {
 			lastLimit = limit;
 			realStart = Clock::now();
 			emulatedStart = machine.Now();
 		}
 		Clock::time_point now = Clock::now();
-		if (limit > 0) {
-			double emulated = (machine.Now() - emulatedStart)
-				/ (double)ticksPerSecond;
-			double target = emulated * 100.0 / limit;
-			double real = std::chrono::duration<double>(now - realStart)
-				.count();
-			if (target > real + 0.001) {
-				std::unique_lock<std::mutex> lock(fLock);
-				fCondition.wait_for(lock, std::chrono::duration<double>(
-					target - real));
-			} else if (real - target > 0.25) {
-				// too far behind: do not try to catch up
+		double emulated = (machine.Now() - emulatedStart)
+			/ (double)ticksPerSecond;
+		double real = std::chrono::duration<double>(now - realStart).count();
+		double lead = emulated - real;
+		if (lead > 0.001) {
+			speed = std::min(maxSpeed, speed * kFaster);
+			std::unique_lock<std::mutex> lock(fLock);
+			fCondition.wait_for(lock, std::chrono::duration<double>(lead));
+		} else if (lead < -kBehind) {
+			if (busy > 0.1 && lead < lastLead)
+				speed = std::max(minSpeed, speed * kSlower);
+			if (lead < -0.25) {
+				// too far behind (the host was busy): do not catch up
 				realStart = now;
 				emulatedStart = machine.Now();
+				lead = 0;
 			}
 		}
+		lastLead = lead;
 
 		double statsSpan = std::chrono::duration<double>(now - statsTime)
 			.count();
 		if (statsSpan >= 0.5) {
 			u64 instructions = machine.InstructionCount();
 			std::lock_guard<std::mutex> lock(fStatusLock);
+			// time against real time, times the processors' speed
 			fStatus.speedPercent = 100.0 * (machine.Now() - statsEmulated)
-				/ (double)ticksPerSecond / statsSpan;
+				/ (double)ticksPerSecond / statsSpan
+				* (speedRuns > 0 ? speedSum / speedRuns : speed);
+			speedSum = 0;
+			speedRuns = 0;
 			fStatus.mips = (instructions - statsInstructions) / statsSpan
 				/ 1e6;
 			statsTime = now;

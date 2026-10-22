@@ -34,6 +34,7 @@ public:
 		float			outputRate;
 		uint32			bufferFrames;	// per player buffer
 		float			correction;		// of the resampling step
+		uint32			primeFrames;	// the fill level aimed at
 	};
 
 								HaikuAudio();
@@ -67,6 +68,7 @@ private:
 			std::atomic<float>	fVolume;
 			std::atomic<bool>	fMuted;
 			bool				fPrimed;
+			std::atomic<uint32>	fPrimeFrames;	// grows after running dry
 			double				fAverageFill;	// frames
 
 			std::atomic<uint64>	fReceived;

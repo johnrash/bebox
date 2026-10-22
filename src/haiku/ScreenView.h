@@ -2,16 +2,20 @@
  * BeBox emulator for Haiku - the emulated display.
  * Copyright 2026, the BeBox emulator authors. MIT License.
  *
- * Frames arrive on the emulation thread (VideoSink); they are copied to a
- * staging buffer and the view is told to redraw from its window thread.
+ * Frames arrive on the emulation thread (VideoSink); the lines that changed
+ * are copied to a staging buffer and the view is told to redraw them from
+ * its window thread.
  * A click captures the mouse (relative PS/2 motion); the host key
- * releases it.
+ * releases it. In full screen the picture fills the screen (keeping its
+ * proportions) or is shown at a whole multiple of its size, and a hint
+ * can be shown over it for a while.
  */
 #ifndef BEBOX_SCREEN_VIEW_H
 #define BEBOX_SCREEN_VIEW_H
 
 #include "core/host/VideoSink.h"
 
+#include <String.h>
 #include <View.h>
 
 #include <atomic>
@@ -32,6 +36,14 @@ public:
 			// 1, 2 or 0 (fit the view)
 			void				SetScale(int32 scale);
 			int32				Scale() const { return fScale; }
+			// Full screen: no minimum size (the window is the screen's),
+			// the picture scaled by SetFullScreenScale() instead.
+			void				SetFullScreen(bool fullScreen);
+			// FullScreenScale (BeBox.h)
+			void				SetFullScreenScale(int32 scale);
+			// Text over the top of the picture for a few seconds ("" hides
+			// it at once).
+			void				ShowHint(const char* text);
 			BSize				FrameSize() const;
 			bool				IsMouseCaptured() const { return fCaptured; }
 			void				SetMouseCaptured(bool captured);
@@ -45,7 +57,8 @@ public:
 
 	// VideoSink (emulation thread)
 	virtual	void				FrameReady(const uint32* pixels, int width,
-									int height, int stride);
+									int height, int stride, int top,
+									int bottom);
 
 	// BView
 	virtual	void				AttachedToWindow();
@@ -60,8 +73,12 @@ public:
 	virtual	BSize				PreferredSize();
 
 private:
-			void				_UpdateBitmap();
+			// The lines that changed since the last time (all when the size
+			// changed, 'resized'), into the bitmap.
+			void				_UpdateBitmap(int& top, int& bottom,
+									bool& resized);
 			BRect				_DestinationRect() const;
+			BRect				_HintRect();
 			void				_SendMouse(int dx, int dy, int dz);
 			uint8				_Buttons() const;
 			BPoint				_ScreenCenter() const;
@@ -71,9 +88,16 @@ private:
 			std::vector<uint32>	fStaging;
 			int					fStagingWidth;
 			int					fStagingHeight;
+			// staging lines the bitmap does not have yet
+			int					fDirtyTop;
+			int					fDirtyBottom;
 			std::atomic<bool>	fFramePending;
 			BBitmap*			fBitmap;
 			int32				fScale;
+			bool				fFullScreen;
+			int32				fFullScreenScale;
+			BString				fHint;
+			int32				fHintGeneration;
 			bool				fCaptured;
 			bool				fPowered;
 			uint32				fButtons;

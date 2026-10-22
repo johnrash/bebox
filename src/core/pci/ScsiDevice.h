@@ -99,6 +99,7 @@ private:
 			std::string			fVendor;
 			std::string			fProduct;
 			u64					fWriteLba;
+			bool				fWriteFailing;	// logged once until it works
 };
 
 class ScsiCd : public ScsiDevice {

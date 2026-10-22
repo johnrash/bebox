@@ -68,6 +68,12 @@ public:
 									{ return us * TicksPerSecond()
 										/ 1000000; }
 	virtual	u64					InstructionCount() const = 0;
+			// The processors' speed: the machine ticks an instruction takes
+			// at the model's clock (and the CPI setting), and the ticks it
+			// takes from now on (fewer: faster processors; time is not
+			// affected).
+	virtual	double				NominalInstructionTicks() const = 0;
+	virtual	void				SetInstructionTicks(u32 ticks) = 0;
 
 	virtual	PhysBus&			Bus() = 0;
 	virtual	Scheduler&			GetScheduler() = 0;
@@ -104,6 +110,11 @@ public:
 			// One line: running, halted or held in reset, the program
 			// counter and the main control registers.
 	virtual	std::string			CpuState(int cpu) const = 0;
+			// Profiling (bebox-headless --stats): from now on, where the
+			// host's time goes; what the processors and devices did, as
+			// text.
+	virtual	void				SetProfiling(bool profiling) {}
+	virtual	std::string			Statistics() const { return ""; }
 			// The physical address of a virtual one, as the CPU sees it.
 	virtual	bool				DebugTranslate(int cpu, u32 va, u32& pa) = 0;
 

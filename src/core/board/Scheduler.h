@@ -12,7 +12,8 @@
 #include "../Types.h"
 
 #include <functional>
-#include <queue>
+#include <map>
+#include <string>
 #include <vector>
 
 namespace bebox {
@@ -72,6 +73,17 @@ public:
 			// Fires all timers that are due at or before 'now'.
 			void				RunDue(u64 now);
 
+			// Profiling: the calls of each timer (by name) and the host
+			// time they took.
+			struct TimerProfile {
+				u64				calls = 0;
+				double			seconds = 0;
+			};
+			void				SetProfiling(bool profiling)
+									{ fProfiling = profiling; }
+			const std::map<std::string, TimerProfile>& Profile() const
+									{ return fProfile; }
+
 private:
 	friend class Timer;
 
@@ -84,12 +96,16 @@ private:
 	};
 
 			void				_Push(Timer* timer);
+			void				_Remove(const Timer* timer);
+			void				_Pop();
 
 			u64					fNow;
+			bool				fProfiling = false;
+			std::map<std::string, TimerProfile> fProfile;
 	static thread_local const Scheduler* sClockOwner;
 	static thread_local const u64* sClock;
-			std::priority_queue<Entry, std::vector<Entry>,
-				std::greater<Entry> > fQueue;
+			// a heap, the earliest entry first
+			std::vector<Entry>	fQueue;
 };
 
 }	// namespace bebox

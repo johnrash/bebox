@@ -2,16 +2,23 @@
 #   make            build everything (ASan + UBSan)
 #   make check      build and run the test suites
 #   make FAST=1     optimized build without sanitizers (benchmarks)
+#   make TSAN=1     ThreadSanitizer build (threaded mode: cpu-unit-tests,
+#                   bebox-headless --threads)
 
 ROOT := ../..
 CORE := $(ROOT)/src/core
 OUT := out
 
 CXX ?= g++
-CXXFLAGS := -std=c++17 -Wall -Wextra -Wno-unused-parameter -g -I$(ROOT)/src
+CXXFLAGS := -std=c++17 -Wall -Wextra -Wno-unused-parameter -g -I$(ROOT)/src \
+	-ffp-contract=off
 ifeq ($(FAST),1)
 	CXXFLAGS += -O2 -DNDEBUG
 	OUT := out/fast
+else ifeq ($(TSAN),1)
+	CXXFLAGS += -O1 -fsanitize=thread -fno-omit-frame-pointer
+	LDFLAGS += -fsanitize=thread
+	OUT := out/tsan
 else
 	CXXFLAGS += -O1 -fsanitize=address,undefined -fno-omit-frame-pointer
 	LDFLAGS += -fsanitize=address,undefined

@@ -137,6 +137,10 @@ public:
 			u64					Now() const { return fNow; }
 			const u64*			NowPointer() const { return &fNow; }
 			void				SetNow(u64 now) { fNow = now; }
+			// The time an instruction takes (sets the processor's speed).
+			void				SetTicksPerInstruction(u32 ticks)
+									{ fConfig.ticksPerInstruction
+										= ticks > 0 ? ticks : 1; }
 			u64					InstructionCount() const
 									{ return fInstructions; }
 

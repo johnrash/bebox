@@ -4,6 +4,9 @@
  */
 #include "Scheduler.h"
 
+#include <algorithm>
+#include <chrono>
+
 namespace bebox {
 
 thread_local const Scheduler* Scheduler::sClockOwner = nullptr;
@@ -21,13 +24,11 @@ Timer::Timer(Scheduler& scheduler, Callback callback, const char* name)
 }
 
 
+// The scheduler must outlive its timers (it does: devices and the machine
+// declare it first).
 Timer::~Timer()
 {
-	// Queue entries of a destroyed timer must not fire: the scheduler keeps
-	// raw pointers, so timers live as long as the scheduler (they are
-	// members of devices owned by the machine).
-	fGeneration++;
-	fArmed = false;
+	fScheduler._Remove(this);
 }
 
 
@@ -72,7 +73,29 @@ Scheduler::~Scheduler()
 void
 Scheduler::_Push(Timer* timer)
 {
-	fQueue.push(Entry{ timer->fWhen, timer->fGeneration, timer });
+	fQueue.push_back(Entry{ timer->fWhen, timer->fGeneration, timer });
+	std::push_heap(fQueue.begin(), fQueue.end(), std::greater<Entry>());
+}
+
+
+// A timer goes away: its entries with it (the queue holds pointers).
+void
+Scheduler::_Remove(const Timer* timer)
+{
+	size_t count = fQueue.size();
+	fQueue.erase(std::remove_if(fQueue.begin(), fQueue.end(),
+		[timer](const Entry& entry) { return entry.timer == timer; }),
+		fQueue.end());
+	if (fQueue.size() != count)
+		std::make_heap(fQueue.begin(), fQueue.end(), std::greater<Entry>());
+}
+
+
+void
+Scheduler::_Pop()
+{
+	std::pop_heap(fQueue.begin(), fQueue.end(), std::greater<Entry>());
+	fQueue.pop_back();
 }
 
 
@@ -80,10 +103,10 @@ u64
 Scheduler::NextEventTime()
 {
 	while (!fQueue.empty()) {
-		const Entry& top = fQueue.top();
+		const Entry& top = fQueue.front();
 		if (top.timer->fArmed && top.generation == top.timer->fGeneration)
 			return top.when;
-		fQueue.pop();	// stale entry
+		_Pop();		// stale entry
 	}
 	return ~(u64)0;
 }
@@ -93,10 +116,10 @@ void
 Scheduler::RunDue(u64 now)
 {
 	while (!fQueue.empty()) {
-		Entry top = fQueue.top();
+		Entry top = fQueue.front();
 		if (top.when > now)
 			break;
-		fQueue.pop();
+		_Pop();
 		Timer* timer = top.timer;
 		if (!timer->fArmed || top.generation != timer->fGeneration)
 			continue;
@@ -107,7 +130,15 @@ Scheduler::RunDue(u64 now)
 		u64 saved = fNow;
 		fNow = top.when;
 		sClockOwner = nullptr;
-		timer->fCallback();
+		if (fProfiling) {
+			auto start = std::chrono::steady_clock::now();
+			timer->fCallback();
+			TimerProfile& profile = fProfile[timer->fName];
+			profile.calls++;
+			profile.seconds += std::chrono::duration<double>(
+				std::chrono::steady_clock::now() - start).count();
+		} else
+			timer->fCallback();
 		fNow = saved;
 		sClockOwner = savedOwner;
 		sClock = savedClock;

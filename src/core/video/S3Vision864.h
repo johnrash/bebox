@@ -54,6 +54,8 @@ protected:
 	virtual	u32					LegacyBankOffset(u32 offset);
 	virtual	void				DrawOverlays(u32* frame, int width,
 									int height, int stride);
+	virtual	bool				OverlayLines(int height, int& top,
+									int& bottom) const;
 
 private:
 	class Ports;

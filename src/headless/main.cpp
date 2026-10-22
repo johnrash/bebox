@@ -31,6 +31,7 @@
 #include "core/isa/Uart16550.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdarg>
 #include <chrono>
 #include <cstdio>
@@ -44,6 +45,13 @@
 #include <vector>
 
 #include <unistd.h>
+#if defined(__linux__) && defined(__x86_64__)
+#include <csignal>
+#include <map>
+#include <sys/time.h>
+#include <ucontext.h>
+#define HAVE_PROFILER 1
+#endif
 
 using namespace bebox;
 
@@ -281,12 +289,17 @@ public:
 	int height = 0;
 	u64 frames = 0;
 
-	virtual void FrameReady(const u32* data, int w, int h, int stride)
+	virtual void FrameReady(const u32* data, int w, int h, int stride,
+		int top, int bottom)
 	{
-		width = w;
-		height = h;
-		pixels.resize((size_t)w * h);
-		for (int y = 0; y < h; y++)
+		if (w != width || h != height) {
+			width = w;
+			height = h;
+			pixels.resize((size_t)w * h);
+			top = 0;
+			bottom = h;
+		}
+		for (int y = top; y < bottom; y++)
 			memcpy(&pixels[(size_t)y * w], data + (size_t)y * stride, w * 4);
 		frames++;
 	}
@@ -349,6 +362,16 @@ Usage()
 		"  --trace-cpus MASK   CPUs to trace (1 = cpu0, 2 = cpu1, 3 = both)\n"
 		"  --trace-pc ADDR     trace only these PCs (repeatable), with time\n"
 		"  --status MS         print the CPU states every MS emulated ms\n"
+		"  --stats             at the end: where the host's time went (the\n"
+		"                      processors, the devices' timers, two\n"
+		"                      threads or one) and the processors' slow\n"
+		"                      paths (translations, device accesses,\n"
+		"                      exceptions)\n"
+#ifdef HAVE_PROFILER
+		"  --profile           at the end: the emulator's functions that\n"
+		"                      took the host's processor time (sampled)\n"
+#endif
+		"  --stats-from MS     profile from MS emulated ms on (default 0)\n"
 		"  --video none|cirrus|s3  video card (default s3: #9 GXE64)\n"
 		"  --vram MB           video memory (1, 2 or 4; default 2)\n"
 		"  --screenshot FILE   save the last frame as PNG at the end\n"
@@ -370,18 +393,128 @@ Usage()
 		"  --shots PREFIX      save a PNG every second (PREFIX-N.png)\n");
 }
 
+#ifdef HAVE_PROFILER
+// --profile: the program counter of the running thread, sampled every
+// millisecond of processor time; at the end the functions (by addr2line)
+// with the most samples.
+std::vector<uintptr_t> sSamples;
+std::atomic<size_t> sSampleCount(0);
 
-LogLevel
-ParseLevel(const char* name)
+
+void
+ProfileSample(int, siginfo_t*, void* context)
 {
-	static const char* const kNames[] = { "error", "warning", "info",
-		"debug", "trace" };
-	for (int i = 0; i < 5; i++) {
-		if (strcmp(name, kNames[i]) == 0)
-			return (LogLevel)i;
-	}
-	return kLogWarning;
+	uintptr_t pc = ((ucontext_t*)context)->uc_mcontext.gregs[REG_RIP];
+	size_t index = sSampleCount.fetch_add(1, std::memory_order_relaxed);
+	if (index < sSamples.size())
+		sSamples[index] = pc;
 }
+
+
+void
+StartProfile()
+{
+	sSamples.assign(4 << 20, 0);
+	struct sigaction action;
+	memset(&action, 0, sizeof(action));
+	action.sa_sigaction = ProfileSample;
+	action.sa_flags = SA_SIGINFO | SA_RESTART;
+	sigaction(SIGPROF, &action, nullptr);
+	struct itimerval timer = { { 0, 1000 }, { 0, 1000 } };
+	setitimer(ITIMER_PROF, &timer, nullptr);
+}
+
+
+void
+ReportProfile(int top)
+{
+	struct itimerval off;
+	memset(&off, 0, sizeof(off));
+	setitimer(ITIMER_PROF, &off, nullptr);
+	size_t count = std::min(sSampleCount.load(), sSamples.size());
+	if (count == 0)
+		return;
+
+	// executable mappings: start, end, file offset, file
+	struct Mapping {
+		uintptr_t start, end, offset;
+		std::string path;
+	};
+	std::vector<Mapping> mappings;
+	if (FILE* maps = fopen("/proc/self/maps", "r")) {
+		char line[4096];
+		while (fgets(line, sizeof(line), maps) != nullptr) {
+			unsigned long start, end, offset;
+			char perms[8];
+			char path[4096] = "";
+			if (sscanf(line, "%lx-%lx %7s %lx %*s %*s %4095s", &start, &end,
+					perms, &offset, path) >= 4 && strchr(perms, 'x'))
+				mappings.push_back({ start, end, offset, path });
+		}
+		fclose(maps);
+	}
+	char self[4096];
+	ssize_t length = readlink("/proc/self/exe", self, sizeof(self) - 1);
+	self[length > 0 ? length : 0] = '\0';
+
+	// the executable's addresses go to addr2line; others count by library
+	std::map<std::string, u64> byFunction;
+	std::map<uintptr_t, u64> byAddress;
+	for (size_t i = 0; i < count; i++) {
+		uintptr_t pc = sSamples[i];
+		const Mapping* found = nullptr;
+		for (const Mapping& mapping : mappings) {
+			if (pc >= mapping.start && pc < mapping.end)
+				found = &mapping;
+		}
+		if (found == nullptr)
+			byFunction["[unknown]"]++;
+		else if (found->path == self)
+			byAddress[pc - found->start + found->offset]++;
+		else {
+			std::string name = found->path;
+			byFunction["[" + name.substr(name.rfind('/') + 1) + "]"]++;
+		}
+	}
+	char list[] = "/tmp/bebox-profile-XXXXXX";
+	int fd = mkstemp(list);
+	if (fd >= 0) {
+		std::string addresses;
+		for (const auto& item : byAddress) {
+			char text[32];
+			snprintf(text, sizeof(text), "%lx\n", (unsigned long)item.first);
+			addresses += text;
+		}
+		bool written = write(fd, addresses.data(), addresses.size())
+			== (ssize_t)addresses.size();
+		close(fd);
+		std::string command = std::string("addr2line -f -C -e '") + self
+			+ "' < " + list;
+		FILE* pipe = written ? popen(command.c_str(), "r") : nullptr;
+		char name[4096];
+		char where[4096];
+		for (const auto& item : byAddress) {
+			if (pipe == nullptr || fgets(name, sizeof(name), pipe) == nullptr
+				|| fgets(where, sizeof(where), pipe) == nullptr)
+				break;
+			name[strcspn(name, "\n")] = '\0';
+			byFunction[name] += item.second;
+		}
+		if (pipe != nullptr)
+			pclose(pipe);
+		unlink(list);
+	}
+	std::vector<std::pair<u64, std::string> > sorted;
+	for (const auto& item : byFunction)
+		sorted.push_back(std::make_pair(item.second, item.first));
+	std::sort(sorted.rbegin(), sorted.rend());
+	printf("profile: %zu samples (1 ms of processor time each)\n", count);
+	for (int i = 0; i < top && i < (int)sorted.size(); i++) {
+		printf("  %5.1f%%  %s\n", 100.0 * sorted[i].first / count,
+			sorted[i].second.substr(0, 100).c_str());
+	}
+}
+#endif
 
 }	// namespace
 
@@ -397,6 +530,9 @@ main(int argc, char** argv)
 	int traceCpus = 3;
 	std::vector<u32> tracePcs;
 	double statusMs = 0;
+	bool stats = false;
+	bool profile = false;
+	double statsFromMs = 0;
 	std::string screenshot;
 	std::string mainRom;
 	struct Dump {
@@ -580,18 +716,9 @@ main(int argc, char** argv)
 		else if (arg.compare(0, 8, "--serial") == 0 && arg.size() == 9)
 			serial[arg[8] - '1'] = next();
 		else if (arg == "--log") {
-			std::string value = next();
-			size_t equal = value.find('=');
-			std::string name = value.substr(0, equal);
-			LogLevel level = ParseLevel(equal == std::string::npos ? "debug"
-				: value.substr(equal + 1).c_str());
-			LogCategory category;
-			if (name == "all")
-				Log::SetAllLevels(level);
-			else if (Log::CategoryFromName(name.c_str(), category))
-				Log::SetLevel(category, level);
-			else
-				fprintf(stderr, "unknown log category %s\n", name.c_str());
+			const char* value = next();
+			if (!Log::Configure(value))
+				fprintf(stderr, "unknown log category in %s\n", value);
 		} else if (arg == "--trace")
 			traceCount = strtoull(next(), nullptr, 0);
 		else if (arg == "--trace-from")
@@ -602,6 +729,14 @@ main(int argc, char** argv)
 			tracePcs.push_back(strtoul(next(), nullptr, 16));
 		else if (arg == "--status")
 			statusMs = atof(next());
+		else if (arg == "--stats")
+			stats = true;
+		else if (arg == "--stats-from")
+			statsFromMs = atof(next());
+#ifdef HAVE_PROFILER
+		else if (arg == "--profile")
+			profile = true;
+#endif
 		else if (arg == "--video") {
 			std::string card = next();
 			config.videoCard = card == "none" ? MachineConfig::kVideoNone
@@ -828,6 +963,19 @@ main(int argc, char** argv)
 			tracePcs);
 	}
 
+	// profiling from statsFromMs on (and the speed reported for that part)
+	bool profiling = false;
+	auto startProfiling = [&]() {
+		profiling = true;
+		if (stats)
+			machine.SetProfiling(true);
+#ifdef HAVE_PROFILER
+		if (profile)
+			StartProfile();
+#endif
+	};
+	if ((stats || profile) && statsFromMs <= 0)
+		startProfiling();
 	auto start = std::chrono::steady_clock::now();
 	u64 total = (u64)(seconds * machine.TicksPerSecond());
 	u64 step = machine.MicrosecondsToTicks(1000);	// 1 ms
@@ -860,6 +1008,9 @@ main(int argc, char** argv)
 				machine.TicksPerSecond(), machine.GetScheduler()));
 			writeWatch->Install();
 		}
+		if ((stats || profile) && !profiling
+			&& nowUs >= (u64)(statsFromMs * 1000))
+			startProfiling();
 		u64 chunk = std::min(step, total - done);
 		machine.RunFor(chunk);
 		done += chunk;
@@ -1052,6 +1203,12 @@ main(int argc, char** argv)
 		machine.InstructionCount() / elapsed / 1e6);
 	for (int i = 0; i < machine.CpuCount(); i++)
 		printf("cpu%d: %s\n", i, machine.CpuState(i).c_str());
+	if (stats)
+		printf("%s", machine.Statistics().c_str());
+#ifdef HAVE_PROFILER
+	if (profile)
+		ReportProfile(40);
+#endif
 	for (const Dump& dump : dumps) {
 		std::vector<u8> data(dump.length);
 		if (dump.virt) {

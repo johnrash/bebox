@@ -338,7 +338,8 @@ AtaDisk::AtaDisk(std::unique_ptr<DiskImage> image)
 	fCommand(0),
 	fLba(0),
 	fRemaining(0),
-	fLba48(false)
+	fLba48(false),
+	fWriteFailing(false)
 {
 	fSectors = fImage->Size() / kSectorSize;
 	fHeads = 16;
@@ -545,12 +546,18 @@ AtaDisk::WriteBlockDone(IdeTaskFile& task)
 	fController->SetActivity(true);
 	if (!fImage->Write(fLba * kSectorSize, buffer.data(),
 			block * kSectorSize)) {
+		if (!fWriteFailing) {
+			BB_LOG(kLogStorage, kLogError, "cannot write to the disk image "
+				"%s: BeOS gets a write error", fImage->Path().c_str());
+		}
+		fWriteFailing = true;
 		task.error = kIdeErrorAbort;
 		_SetAddress(task, fLba);
 		fController->CompleteCommand(kIdeStatusReady | kIdeStatusError,
 			true, fController->Ticks(20));
 		return;
 	}
+	fWriteFailing = false;
 	fRemaining -= block;
 	fLba += block;
 	_SetAddress(task, fLba - 1);

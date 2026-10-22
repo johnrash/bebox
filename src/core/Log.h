@@ -59,6 +59,12 @@ public:
 		const char* format, ...) __attribute__((format(printf, 3, 4)));
 	static const char* CategoryName(LogCategory category);
 	static bool CategoryFromName(const char* name, LogCategory& category);
+	// "CATEGORY=LEVEL", "all=LEVEL" or "CATEGORY" (debug): sets levels
+	// (an unknown level name is warning); false for an unknown category.
+	static bool Configure(const char* spec);
+	// Writes to stderr: the sink unless another one is set.
+	static void DefaultSink(LogCategory category, LogLevel level,
+		const char* message, void* cookie);
 
 private:
 	static LogLevel sLevels[kLogCategoryCount];

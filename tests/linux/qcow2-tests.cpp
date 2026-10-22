@@ -1,7 +1,8 @@
 /*
  * QCOW2 tests: random writes through Qcow2Image mirrored to a raw image,
  * checked against each other and, when available, by qemu-img (check,
- * compare) and on images qemu-img made (plain, compressed, overlay).
+ * compare) and on images qemu-img made (plain, compressed, overlay);
+ * writes on a full disk (a file size limit).
  * Copyright 2026, the BeBox emulator authors. MIT License.
  *
  * usage: qcow2-tests WORKDIR
@@ -9,11 +10,14 @@
 #include "core/storage/DiskImage.h"
 #include "core/storage/Qcow2Image.h"
 
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <random>
 #include <string>
+#include <sys/resource.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
@@ -251,6 +255,134 @@ TestQemuImages(const std::string& dir)
 	printf("ok: overlay on a backing file\n");
 }
 
+
+// Files cannot grow past 'limit' bytes (RLIM_INFINITY: no limit): writes
+// that would fail as on a full disk (EFBIG instead of ENOSPC).
+void
+LimitFileSize(rlim_t limit)
+{
+	struct rlimit rl;
+	getrlimit(RLIMIT_FSIZE, &rl);
+	rl.rlim_cur = limit == RLIM_INFINITY ? rl.rlim_max
+		: std::min(limit, rl.rlim_max);
+	setrlimit(RLIMIT_FSIZE, &rl);
+}
+
+
+u64
+FileSize(const std::string& path)
+{
+	struct stat st;
+	return stat(path.c_str(), &st) == 0 ? (u64)st.st_size : 0;
+}
+
+
+// The disk fills up at random points (in the middle of a cluster too):
+// with 512 byte clusters, data, L2 tables, reference count blocks and the
+// reference count table's growth all meet it. A write that fails changes
+// nothing (each one stays in a cluster), the image stays consistent
+// (Check(), qemu-img check) both as opened and reopened, and writing goes
+// on once there is space again.
+void
+TestDiskFull(const std::string& dir, bool qemu)
+{
+	std::string path = dir + "/full.qcow2";
+	unlink(path.c_str());
+	std::string error;
+	const u64 kSize = 48ULL << 20;
+	const u32 kCluster = 512;
+	if (!Qcow2Image::Create(path, kSize, error, "", 9)) {
+		Fail("disk full: create: " + error);
+		return;
+	}
+	signal(SIGXFSZ, SIG_IGN);
+	std::vector<u8> mirror(kSize, 0);
+	std::mt19937 random(7);
+	std::unique_ptr<DiskImage> image = DiskImage::Open(path, false, error);
+	int writes = 0;
+	int failures = 0;
+	// one in a cluster, at random or the next one
+	u64 next = 0;
+	auto write = [&](bool sequential) {
+		u64 cluster = sequential ? next++ % (kSize / kCluster)
+			: random() % (kSize / kCluster);
+		u32 at = sequential ? 0 : random() % kCluster;
+		u32 length = sequential ? kCluster : 1 + random() % (kCluster - at);
+		std::vector<u8> data(length);
+		for (u8& byte : data)
+			byte = (u8)random();
+		u64 offset = cluster * kCluster + at;
+		writes++;
+		if (!image->Write(offset, data.data(), length)) {
+			failures++;
+			if (sequential)
+				next--;
+			return false;
+		}
+		memcpy(&mirror[offset], data.data(), length);
+		return true;
+	};
+	auto verify = [&](const std::string& when, bool reopen) {
+		if (reopen) {
+			image.reset();
+			image = DiskImage::Open(path, false, error);
+			if (!image) {
+				Fail("disk full: reopen " + when + ": " + error);
+				return false;
+			}
+		}
+		std::string report;
+		if (static_cast<Qcow2Image*>(image.get())->Check(report) != 0) {
+			Fail("disk full: check " + when + ": " + report);
+			return false;
+		}
+		std::vector<u8> content(kSize);
+		if (!image->Read(0, content.data(), kSize) || content != mirror) {
+			Fail("disk full: contents " + when);
+			return false;
+		}
+		return true;
+	};
+
+	// The reference count table (one 512 byte cluster: 64 blocks of 256
+	// clusters, 8 MB) has to grow when the file reaches 8 MB: the disk is
+	// full just then.
+	LimitFileSize((8 << 20) + kCluster + kCluster / 2);
+	while (image && write(true))
+		;
+	LimitFileSize(RLIM_INFINITY);
+	if (FileSize(path) > (8 << 20) || failures != 1)
+		Fail("disk full: did not fill up at 8 MB");
+	if (!verify("when the table could not grow", false)
+		|| !verify("when the table could not grow, reopened", true))
+		return;
+	for (int i = 0; i < 100; i++)
+		write(true);
+	if (FileSize(path) <= (8 << 20) || !verify("after the table grew", true))
+		Fail("disk full: the table did not grow later");
+
+	// at random
+	for (int round = 0; round < 80 && image; round++) {
+		for (int i = 0; i < 400; i++)
+			write(false);
+		// room for 0 to 3.5 more clusters
+		LimitFileSize(FileSize(path) + random() % (7 * kCluster / 2));
+		for (int i = 0; i < 1000 && write(round % 3 == 0); i++)
+			;
+		LimitFileSize(RLIM_INFINITY);
+		// as opened, or reopened every other round
+		if (!verify("after round " + std::to_string(round), round % 2 == 1))
+			break;
+	}
+	image.reset();
+	if (failures < 60)
+		Fail("disk full: only " + std::to_string(failures) + " full disks");
+	if (qemu && !Run("qemu-img check " + path))
+		Fail("disk full: qemu-img check");
+	printf("ok: full disk (%d writes, %d of them failed; file %llu KB)\n",
+		writes, failures, (unsigned long long)FileSize(path) >> 10);
+}
+
 }	// namespace
 
 
@@ -266,6 +398,7 @@ main(int argc, char** argv)
 	if (!qemu)
 		printf("qemu-img not found: only self checks\n");
 	TestOwnImages(dir, qemu);
+	TestDiskFull(dir, qemu);
 	if (qemu)
 		TestQemuImages(dir);
 	printf("%d failures\n", sFailures);

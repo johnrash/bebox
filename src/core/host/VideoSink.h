@@ -13,12 +13,14 @@ class VideoSink {
 public:
 	virtual ~VideoSink() {}
 
-	// A complete frame, called at the emulated vertical retrace on the
-	// emulation thread. 'pixels' holds 0x00RRGGBB host-endian values;
-	// 'stride' is in pixels. The buffer is only valid during the call.
-	// width or height 0 means the display is off.
+	// The picture changed: called at the emulated vertical retrace on the
+	// emulation thread (not when nothing changed). 'pixels' holds the whole
+	// picture as 0x00RRGGBB host-endian values; 'stride' is in pixels.
+	// Lines 'top' to 'bottom' - 1 changed, the others are as in the last
+	// call (all of them when the size changed). The buffer is only valid
+	// during the call.
 	virtual void FrameReady(const u32* pixels, int width, int height,
-		int stride) = 0;
+		int stride, int top, int bottom) = 0;
 };
 
 }	// namespace bebox

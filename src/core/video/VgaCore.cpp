@@ -7,6 +7,7 @@
 #include "../Log.h"
 
 #include <algorithm>
+#include <cstring>
 
 namespace bebox {
 
@@ -480,6 +481,36 @@ VgaCore::ComputeMode(DisplayMode& mode)
 }
 
 
+namespace {
+
+int
+BytesPerPixel(VgaCore::PixelFormat format)
+{
+	switch (format) {
+		case VgaCore::kIndexed8:
+			return 1;
+		case VgaCore::kRgb555:
+		case VgaCore::kRgb565:
+			return 2;
+		case VgaCore::kRgb888:
+			return 3;
+		case VgaCore::kRgbx8888:
+			return 4;
+		default:
+			return 0;
+	}
+}
+
+}	// namespace
+
+
+// Renders the frame and passes what changed to the sink, nothing when
+// nothing did. In the packed pixel modes (the desktop's) each line of the
+// picture is compared with the copy of video memory converted last time,
+// and only the lines that differ are converted; the overlays (hardware
+// cursor) are drawn on a copy, and the lines they cover go to the sink only
+// if they look different. Text, planar and pixel doubled modes are
+// converted whole every time.
 void
 VgaCore::RenderFrame()
 {
@@ -490,15 +521,173 @@ VgaCore::RenderFrame()
 	int width = std::min(std::max(mode.width, 0), 2048);
 	int height = std::min(std::max(mode.height, 0), 1536);
 	if (width < 8 || height < 8 || blanked) {
-		if (fSink != nullptr) {
-			// keep the last size, show black
-			int w = std::max(width, 640);
-			int h = std::max(height, 480);
-			fFrame.assign((size_t)w * h, 0);
-			fSink->FrameReady(fFrame.data(), w, h, w);
-		}
+		// keep the last size, show black
+		int w = std::max(width, 640);
+		int h = std::max(height, 480);
+		if (fShown == kShownBlack && w == fFrameWidth && h == fFrameHeight)
+			return;
+		fFrame.assign((size_t)w * h, 0);
+		fShown = kShownBlack;
+		_Show(w, h, 0, h);
 		return;
 	}
+	int bytes = BytesPerPixel(mode.format);
+	u32 lineBytes = (u32)width * bytes;
+	if (bytes == 0 || mode.pixelDoubling > 1
+		|| mode.start + (u64)(height - 1) * mode.pitch + lineBytes
+			> fVram.size()) {
+		_RenderAll(mode, width, height);
+		fShown = kShownWhole;
+		return;
+	}
+
+	u32 palette[256];
+	if (mode.format == kIndexed8) {
+		for (int i = 0; i < 256; i++)
+			palette[i] = PaletteColor(i & fDacMask);
+	} else
+		memset(palette, 0, sizeof(palette));
+	bool full = fShown != kShownLines || !(mode == fShadowMode)
+		|| fShadow.size() != (size_t)height * lineBytes
+		|| memcmp(palette, fShadowPalette, sizeof(palette)) != 0;
+	if (full) {
+		fShadow.resize((size_t)height * lineBytes);
+		fBase.resize((size_t)width * height);
+		fShadowMode = mode;
+		memcpy(fShadowPalette, palette, sizeof(palette));
+	}
+	// the lines that changed in video memory
+	int top = height;
+	int bottom = 0;
+	for (int y = 0; y < height; y++) {
+		const u8* line = fVram.data() + mode.start + (u32)y * mode.pitch;
+		u8* copy = &fShadow[(size_t)y * lineBytes];
+		if (!full && memcmp(line, copy, lineBytes) == 0)
+			continue;
+		memcpy(copy, line, lineBytes);
+		_ConvertLine(mode.format, line, &fBase[(size_t)y * width], width,
+			palette);
+		top = std::min(top, y);
+		bottom = y + 1;
+	}
+	int overlayTop = 0;
+	int overlayBottom = 0;
+	if (!OverlayLines(height, overlayTop, overlayBottom))
+		overlayTop = overlayBottom = 0;
+	if (full) {
+		fFrame = fBase;
+		DrawOverlays(fFrame.data(), width, height, width);
+		fShown = kShownLines;
+		fOverlayTop = overlayTop;
+		fOverlayBottom = overlayBottom;
+		_Show(width, height, 0, height);
+		return;
+	}
+
+	// The overlays' lines before and now: what the picture shows there is
+	// kept to compare.
+	int spanTop = height;
+	int spanBottom = 0;
+	if (fOverlayTop < fOverlayBottom) {
+		spanTop = fOverlayTop;
+		spanBottom = fOverlayBottom;
+	}
+	if (overlayTop < overlayBottom) {
+		spanTop = std::min(spanTop, overlayTop);
+		spanBottom = std::max(spanBottom, overlayBottom);
+	}
+	if (spanTop < spanBottom) {
+		fOverlayScratch.assign(fFrame.begin() + (size_t)spanTop * width,
+			fFrame.begin() + (size_t)spanBottom * width);
+	}
+	auto recompose = [&](int from, int to) {
+		if (from < to) {
+			memcpy(&fFrame[(size_t)from * width], &fBase[(size_t)from * width],
+				(size_t)(to - from) * width * 4);
+		}
+	};
+	recompose(top, bottom);
+	recompose(spanTop, spanBottom);
+	DrawOverlays(fFrame.data(), width, height, width);
+	fOverlayTop = overlayTop;
+	fOverlayBottom = overlayBottom;
+	for (int y = spanTop; y < spanBottom; y++) {
+		if (y >= top && y < bottom)
+			continue;
+		if (memcmp(&fFrame[(size_t)y * width],
+				&fOverlayScratch[(size_t)(y - spanTop) * width],
+				(size_t)width * 4) != 0) {
+			top = std::min(top, y);
+			bottom = std::max(bottom, y + 1);
+		}
+	}
+	if (top < bottom)
+		_Show(width, height, top, bottom);
+}
+
+
+void
+VgaCore::_ConvertLine(PixelFormat format, const u8* in, u32* out, int width,
+	const u32* palette)
+{
+	switch (format) {
+		case kIndexed8:
+			for (int x = 0; x < width; x++)
+				out[x] = palette[in[x]];
+			break;
+		case kRgb555:
+		case kRgb565:
+			for (int x = 0; x < width; x++) {
+				u16 p = (u16)(in[x * 2] | (in[x * 2 + 1] << 8));
+				u32 r, g, b;
+				if (format == kRgb565) {
+					r = (p >> 11) & 0x1f;
+					g = (p >> 5) & 0x3f;
+					b = p & 0x1f;
+					g = (g << 2) | (g >> 4);
+				} else {
+					r = (p >> 10) & 0x1f;
+					g = (p >> 5) & 0x1f;
+					b = p & 0x1f;
+					g = (g << 3) | (g >> 2);
+				}
+				r = (r << 3) | (r >> 2);
+				b = (b << 3) | (b >> 2);
+				out[x] = (r << 16) | (g << 8) | b;
+			}
+			break;
+		case kRgb888:
+			for (int x = 0; x < width; x++) {
+				const u8* p = in + x * 3;
+				out[x] = (p[2] << 16) | (p[1] << 8) | p[0];
+			}
+			break;
+		case kRgbx8888:
+			for (int x = 0; x < width; x++) {
+				const u8* p = in + x * 4;
+				out[x] = (p[2] << 16) | (p[1] << 8) | p[0];
+			}
+			break;
+		default:
+			break;
+	}
+}
+
+
+void
+VgaCore::_Show(int width, int height, int top, int bottom)
+{
+	fFrameWidth = width;
+	fFrameHeight = height;
+	if (fSink != nullptr)
+		fSink->FrameReady(fFrame.data(), width, height, width, top, bottom);
+}
+
+
+// The whole picture, converted from video memory (and shown) every time.
+void
+VgaCore::_RenderAll(const DisplayMode& mode, int width, int height)
+{
 	fFrame.resize((size_t)width * height);
 	u32* out = fFrame.data();
 	const u8* vram = fVram.data();
@@ -665,8 +854,7 @@ VgaCore::RenderFrame()
 	}
 
 	DrawOverlays(out, width, height, width);
-	if (fSink != nullptr)
-		fSink->FrameReady(out, width, height, width);
+	_Show(width, height, 0, height);
 }
 
 }	// namespace bebox

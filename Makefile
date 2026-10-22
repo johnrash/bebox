@@ -13,6 +13,7 @@ SRCS = \
 	src/haiku/App.cpp \
 	src/haiku/HaikuAttributes.cpp \
 	src/haiku/HaikuAudio.cpp \
+	src/haiku/JobQueue.cpp \
 	src/haiku/LedColumnView.cpp \
 	src/haiku/MachineWindow.cpp \
 	src/haiku/MediaStatusView.cpp \
@@ -37,7 +38,7 @@ SYSTEM_INCLUDE_PATHS = /boot/system/develop/headers/private/shared \
 	/boot/system/develop/headers/private/interface
 OPTIMIZE := FULL
 WARNINGS = ALL
-COMPILER_FLAGS = -std=c++17
+COMPILER_FLAGS = -std=c++17 -ffp-contract=off
 DEBUGGER :=
 
 DEVEL_DIRECTORY := /boot/system/develop

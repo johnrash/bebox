@@ -231,7 +231,8 @@ ScsiDisk::ScsiDisk(std::unique_ptr<DiskImage> image,
 	fImage(std::move(image)),
 	fVendor(vendor),
 	fProduct(product),
-	fWriteLba(0)
+	fWriteLba(0),
+	fWriteFailing(false)
 {
 }
 
@@ -350,8 +351,17 @@ ScsiDisk::DataOutSpecific(ScsiCommand& command, const std::vector<u8>& data)
 		|| opcode == 0xaa) {
 		if (fActivity)
 			fActivity(true);
-		if (!fImage->Write(fWriteLba * 512, data.data(), data.size()))
+		if (fImage->Write(fWriteLba * 512, data.data(), data.size()))
+			fWriteFailing = false;
+		else {
+			if (!fWriteFailing) {
+				BB_LOG(kLogStorage, kLogError, "cannot write to the disk "
+					"image %s: BeOS gets a write error",
+					fImage->Path().c_str());
+			}
+			fWriteFailing = true;
 			CheckCondition(command, kSenseMediumError, 0x0c);
+		}
 	}
 }
 

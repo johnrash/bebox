@@ -206,16 +206,17 @@ PrefsWindow::PrefsWindow(Settings& settings, BMessenger target)
 	title.SetToFormat("BeBox preferences: %s", fSettings.profile.String());
 	SetTitle(title.String());
 
-	_AddSection("Machine", "rsrc:machine|application/x-vnd.Haiku-About",
+	_AddSection("Machine", "rsrc:BEOS:ICON|application/x-vnd.Haiku-About",
 		_MachinePage());
-	_AddSection("ROM & NVRAM", "application/x-vnd.Haiku-Devices",
+	_AddSection("ROM & NVRAM", "rsrc:machine|application/x-vnd.Haiku-Devices",
 		_RomPage());
 	_AddSection("Display", "application/x-vnd.Haiku-Screen", _DisplayPage());
 	_AddSection("Storage", "application/x-vnd.Haiku-DriveSetup",
 		_StoragePage());
-	_AddSection("Sound", "application/x-vnd.Haiku-Media", _SoundPage());
-	_AddSection("Keyboard & mouse", "application/x-vnd.Haiku-Input"
-		"|application/x-vnd.Haiku-Mouse", _InputPage());
+	_AddSection("Sound", "rsrc:speaker|application/x-vnd.Haiku-Media",
+		_SoundPage());
+	_AddSection("Keyboard & mouse", "rsrc:mouse|application/x-vnd.Haiku-Input",
+		_InputPage());
 	_AddSection("Game ports", "application/x-vnd.Haiku-Joysticks"
 		"|rsrc:joystick", _GamePortsPage());
 	_AddSection("Network", "application/x-vnd.Haiku-Network", _NetworkPage());
@@ -308,8 +309,8 @@ PrefsWindow::_MachinePage()
 	static const int32 kIoCardValues[] = { 5, 4 };
 	BMenuField* ioCard = _PopUp("I/O card:", kIoCards, kIoCardValues, 2,
 		machine.ioCardRevision, &fIoCardRevision);
-	static const char* const kSpeeds[] = { "50%", "Real time", "200%",
-		"As fast as possible" };
+	static const char* const kSpeeds[] = { "50%", "100% (a real BeBox)",
+		"200%", "As fast as possible" };
 	static const int32 kSpeedValues[] = { 50, 100, 200, 0 };
 	BMenuField* speed = _PopUp("Speed:", kSpeeds, kSpeedValues, 4,
 		fSettings.speedLimit, &fSpeed);
@@ -323,11 +324,14 @@ PrefsWindow::_MachinePage()
 		.AddMenuField(revision, 0, 3)
 		.AddMenuField(ioCard, 0, 4)
 		.AddMenuField(speed, 0, 5)
+		.Add(new BStringView("speed", "The processors' speed: BeOS's clock "
+			"and timers keep real time also when they run faster."), 0, 6,
+			2)
 		.Add(new BStringView("hobbit", "The Hobbit prototype takes the "
-			"memory sizes its kernel knows (4 to 32 MB)."), 0, 6, 2)
+			"memory sizes its kernel knows (4 to 32 MB)."), 0, 7, 2)
 		.Add(new BStringView("hobbit2", "Motherboard and I/O card are "
-			"BeBox options."), 0, 7, 2)
-		.AddGlue(0, 8, 2);
+			"BeBox options."), 0, 8, 2)
+		.AddGlue(0, 9, 2);
 	return page;
 }
 

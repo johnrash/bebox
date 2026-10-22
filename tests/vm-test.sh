@@ -138,6 +138,35 @@ else
 	echo "skip pointer test (no $SENDINPUT)"
 fi
 
+echo "== full screen"
+frame() {
+	vm "hey BeBox get Frame of Window BeBox" \
+		| sed -n 's/.*BRect(\(.*\)).*/\1/p'
+}
+screen_frame=$(vm screenmode | awk '/Resolution/ {
+	printf "0.0, 0.0, %d.0, %d.0", $2 - 1, $3 - 1 }')
+windowed=$(frame)
+check "starts windowed" 0 "$(get FullScreen)"
+vm "hey -s BeBox set FullScreen of Window BeBox to true"
+check "FullScreen set" 1 "$(get FullScreen)"
+check "full screen fills the screen" "$screen_frame" "$(frame)"
+if vm "test -x $SENDINPUT"; then
+	# right Ctrl (B_CONTROL_KEY | B_RIGHT_CONTROL_KEY) with F
+	vm "$SENDINPUT application/x-vnd.BeBox-Emulator BeBox mods:2004 \
+		wait:50 key:3f:f wait:50 mods:0"
+	sleep 1
+	check "right Ctrl+F leaves full screen" 0 "$(get FullScreen)"
+else
+	vm "hey -s BeBox set FullScreen of Window BeBox to false"
+fi
+check "window frame back" "$windowed" "$(frame)"
+# (get joins its words: the quotes reach the remote shell)
+scaling="Menu 'Full screen scaling' of Menu View of View menu"
+check "full screen fills by default" 1 "$(get Mark of MenuItem 0 of $scaling)"
+vm "hey -s BeBox fssc of Window BeBox with 'scale=int32(2)'"
+check "full screen 1:1 chosen" 1 "$(get Mark of MenuItem 2 of $scaling)"
+vm "hey -s BeBox fssc of Window BeBox with 'scale=int32(0)'"
+
 echo "== screenshot, serial and floppy"
 vm 'rm -f /tmp/bebox-vmtest.png'
 saved=$(vm "hey BeBox shot of Window BeBox with path=/tmp/bebox-vmtest.png" \

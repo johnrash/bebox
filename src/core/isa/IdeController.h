@@ -109,6 +109,7 @@ private:
 			u64					fLba;
 			u32					fRemaining;		// sectors left
 			bool				fLba48;
+			bool				fWriteFailing;	// logged once until it works
 };
 
 class IdeController : public IoDevice {
